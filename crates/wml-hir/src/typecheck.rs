@@ -684,26 +684,9 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::MemberAccess { object, field } => {
                 let obj_hir = self.check_expr(object, scope, route_auth);
-                let ty = match &obj_hir.ty {
+                let effective_obj_ty = obj_hir.ty.unwrap_signal();
+                let ty = match effective_obj_ty {
                     Type::Namespace(ns) => {
-                        if scope.is_client_island()
-                            && matches!(
-                                ns.as_str(),
-                                "db" | "crypto" | "jwt" | "req" | "res" | "env"
-                            )
-                        {
-                            self.emit_diag(
-                                "WML-SEC-5001",
-                                DiagnosticCategory::SecurityViolation,
-                                &format!(
-                                    "Server module `{}` cannot be accessed in client UI islands. Use a server action instead.",
-                                    ns
-                                ),
-                                span.clone(),
-                                None,
-                            );
-                        }
-
                         if ns == "req" && field == "user" {
                             if !route_auth {
                                 self.emit_diag(
@@ -792,43 +775,57 @@ impl<'a> TypeChecker<'a> {
                 let callee_hir = self.check_expr(callee, scope, route_auth);
                 let mut checked_args = Vec::new();
 
-                let mut call_scope = scope.clone();
-                if let HirExpr::MemberAccess {
+                let is_db_update = if let HirExpr::MemberAccess {
                     object,
                     field: method,
                 } = &callee_hir.kind
                 {
                     if let Type::Namespace(ns) = &object.ty {
-                        if ns == "db" && (method == "update" || method == "get") {
-                            if let Some(CallArg::Positional(first_id)) = args.first() {
-                                if let Expr::Ident(model_name) = self.arena.get_expr(*first_id) {
-                                    if let Some(model) = self.models.get(model_name) {
-                                        let mut child_scope =
-                                            scope.enter_child(ScopeKind::LocalBlock);
-                                        for (f_name, f_def) in &model.fields {
-                                            child_scope.define(
-                                                f_name.clone(),
-                                                f_def.ty.clone(),
-                                                false,
-                                            );
-                                        }
-                                        call_scope = child_scope;
+                        ns == "db" && method == "update"
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                let mut update_scope = scope.clone();
+                if is_db_update {
+                    if let Some(CallArg::Positional(first_id)) = args.first() {
+                        if let Expr::Ident(model_name) = self.arena.get_expr(*first_id) {
+                            if let Some(model) = self.models.get(model_name) {
+                                let mut child_scope = scope.enter_child(ScopeKind::LocalBlock);
+                                for (f_name, f_def) in &model.fields {
+                                    // Only define if not already present in caller scope to prevent shadowing outer variables
+                                    if scope.lookup(f_name).is_none() {
+                                        child_scope.define(f_name.clone(), f_def.ty.clone(), false);
                                     }
                                 }
+                                update_scope = child_scope;
                             }
                         }
                     }
                 }
 
-                for arg in args {
+                let num_args = args.len();
+                for (idx, arg) in args.iter().enumerate() {
+                    // For db.update, only the last argument (the update payload) uses update_scope with model fields
+                    let arg_scope = if is_db_update && idx == num_args - 1 && num_args > 1 {
+                        &update_scope
+                    } else {
+                        scope
+                    };
                     match arg {
                         CallArg::Positional(e) => {
-                            let typed = self.check_expr(e, &call_scope, route_auth);
+                            let typed = self.check_expr(*e, arg_scope, route_auth);
                             checked_args.push(HirCallArg::Positional(typed));
                         }
                         CallArg::Named { name, val } => {
-                            let typed = self.check_expr(val, &call_scope, route_auth);
-                            checked_args.push(HirCallArg::Named { name, val: typed });
+                            let typed = self.check_expr(*val, arg_scope, route_auth);
+                            checked_args.push(HirCallArg::Named {
+                                name: name.clone(),
+                                val: typed,
+                            });
                         }
                     }
                 }
@@ -836,24 +833,6 @@ impl<'a> TypeChecker<'a> {
                 // Check built-in namespace call (e.g. crypto.hash, db.insert, jwt.sign)
                 if let HirExpr::MemberAccess { object, field } = &callee_hir.kind {
                     if let Type::Namespace(ns) = &object.ty {
-                        if scope.is_client_island()
-                            && matches!(
-                                ns.as_str(),
-                                "db" | "crypto" | "jwt" | "req" | "res" | "env"
-                            )
-                        {
-                            self.emit_diag(
-                                "WML-SEC-5001",
-                                DiagnosticCategory::SecurityViolation,
-                                &format!(
-                                    "Server module `{}` cannot be accessed in client UI islands. Use a server action instead.",
-                                    ns
-                                ),
-                                span.clone(),
-                                None,
-                            );
-                        }
-
                         match Builtins::check_call(
                             ns,
                             field,
@@ -1082,12 +1061,16 @@ impl<'a> TypeChecker<'a> {
                 let lhs_hir = self.check_expr(lhs, scope, route_auth);
                 let rhs_hir = self.check_expr(rhs, scope, route_auth);
 
+                let lhs_unwrapped = lhs_hir.ty.unwrap_signal();
+                let rhs_unwrapped = rhs_hir.ty.unwrap_signal();
+
                 let res_ty = match op {
                     wml_syntax::ast::BinaryOp::Coalesce => {
                         // The universal `??` operator
                         // lhs is Optional<T> or Bool, unwraps to T or evaluates rhs
-                        if let Some(unwrapped) = lhs_hir.ty.unwrap_optional() {
-                            if !rhs_hir.ty.is_assignable_to(&unwrapped) && rhs_hir.ty != Type::Void
+                        if let Some(unwrapped) = lhs_unwrapped.unwrap_optional() {
+                            if !rhs_unwrapped.is_assignable_to(&unwrapped)
+                                && rhs_hir.ty != Type::Void
                             {
                                 self.emit_diag(
                                     "WML-TYP-2041",
@@ -1101,11 +1084,11 @@ impl<'a> TypeChecker<'a> {
                                 );
                             }
                             unwrapped
-                        } else if lhs_hir.ty == Type::Bool {
+                        } else if *lhs_unwrapped == Type::Bool {
                             // crypto.verify(...) ?? throw 401
                             Type::Bool
                         } else {
-                            lhs_hir.ty.clone()
+                            lhs_unwrapped.clone()
                         }
                     }
                     wml_syntax::ast::BinaryOp::Assign => {
@@ -1128,17 +1111,17 @@ impl<'a> TypeChecker<'a> {
                     | wml_syntax::ast::BinaryOp::Mul
                     | wml_syntax::ast::BinaryOp::Div
                     | wml_syntax::ast::BinaryOp::Mod => {
-                        if lhs_hir.ty == Type::Int && rhs_hir.ty == Type::Int {
+                        if *lhs_unwrapped == Type::Int && *rhs_unwrapped == Type::Int {
                             Type::Int
-                        } else if (lhs_hir.ty == Type::Float || lhs_hir.ty == Type::Int)
-                            && (rhs_hir.ty == Type::Float || rhs_hir.ty == Type::Int)
+                        } else if (*lhs_unwrapped == Type::Float || *lhs_unwrapped == Type::Int)
+                            && (*rhs_unwrapped == Type::Float || *rhs_unwrapped == Type::Int)
                         {
                             Type::Float
                         } else if op == wml_syntax::ast::BinaryOp::Add
-                            && (lhs_hir.ty == Type::Str || rhs_hir.ty == Type::Str)
+                            && (*lhs_unwrapped == Type::Str || *rhs_unwrapped == Type::Str)
                         {
                             Type::Str
-                        } else if lhs_hir.ty == Type::Any || rhs_hir.ty == Type::Any {
+                        } else if *lhs_unwrapped == Type::Any || *rhs_unwrapped == Type::Any {
                             Type::Any
                         } else {
                             self.emit_diag(
@@ -1155,6 +1138,21 @@ impl<'a> TypeChecker<'a> {
                         }
                     }
                     wml_syntax::ast::BinaryOp::AddAssign | wml_syntax::ast::BinaryOp::SubAssign => {
+                        if !rhs_unwrapped.is_assignable_to(lhs_unwrapped)
+                            && *lhs_unwrapped != Type::Any
+                            && *rhs_unwrapped != Type::Any
+                        {
+                            self.emit_diag(
+                                "WML-TYP-2041",
+                                DiagnosticCategory::TypeMismatch,
+                                &format!(
+                                    "Cannot apply compound assignment `{:?}` with RHS `{}` to `{}`",
+                                    op, rhs_hir.ty, lhs_hir.ty
+                                ),
+                                rhs_span,
+                                None,
+                            );
+                        }
                         lhs_hir.ty.clone()
                     }
                     wml_syntax::ast::BinaryOp::Eq

@@ -217,3 +217,88 @@ fn test_typecheck_req_user_without_auth() {
         .iter()
         .any(|d| d.code == "WML-SEC-5002" && d.category == DiagnosticCategory::SecurityViolation));
 }
+
+#[test]
+fn test_typecheck_res_methods() {
+    let source = r#"
+    route /api/response () {
+        res.status(200)
+        res.json({ok: true})
+        res.redirect("/home")
+    }
+    "#;
+
+    let (program, arena) = parse(source).expect("Parse error");
+    let (_hir, diags) = check(&program, &arena, source, "test.wml");
+
+    assert!(
+        diags.is_empty(),
+        "Expected res methods to typecheck without errors, found: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_typecheck_db_get_named_arg_outer_scope() {
+    let source = r#"
+    type User { id: int, email: str }
+
+    route /api/find (post: {email: str}) {
+        let u = db.get(User, email: email)
+    }
+    "#;
+
+    let (program, arena) = parse(source).expect("Parse error");
+    let (_hir, diags) = check(&program, &arena, source, "test.wml");
+
+    assert!(
+        diags.is_empty(),
+        "Expected db.get to resolve named arg val to outer parameter, found: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_typecheck_signal_math_and_assignment() {
+    let source = r#"
+    ui Counter() {
+        let count = signal(0)
+        let next = count + 1
+        count = 10
+        count += 2
+        <div>{count}</div>
+    }
+    "#;
+
+    let (program, arena) = parse(source).expect("Parse error");
+    let (_hir, diags) = check(&program, &arena, source, "test.wml");
+
+    assert!(
+        diags.is_empty(),
+        "Expected signal arithmetic and assignment to typecheck without errors, found: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_typecheck_sec_5001_deduplicated() {
+    let source = r#"
+    type User { id: int }
+
+    ui ClientIsland() {
+        let u = db.get(User, id: 1)
+        <div>"Island"</div>
+    }
+    "#;
+
+    let (program, arena) = parse(source).expect("Parse error");
+    let (_hir, diags) = check(&program, &arena, source, "test.wml");
+
+    let sec_diags: Vec<_> = diags.iter().filter(|d| d.code == "WML-SEC-5001").collect();
+    assert_eq!(
+        sec_diags.len(),
+        1,
+        "Expected exactly 1 WML-SEC-5001 diagnostic, found: {:?}",
+        sec_diags
+    );
+}

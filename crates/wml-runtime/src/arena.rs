@@ -35,9 +35,18 @@ impl RequestArena {
     /// Fast bump allocation: ~2 CPU instructions without system malloc locks
     #[inline(always)]
     pub fn alloc(&self, size: usize, align: usize) -> *mut u8 {
-        debug_assert!(align.is_power_of_two());
+        if !align.is_power_of_two() {
+            return std::ptr::null_mut();
+        }
+        if size == 0 {
+            return align as *mut u8;
+        }
+
         let current = unsafe { *self.current_ptr.get() };
-        let aligned = (current as usize + (align - 1)) & !(align - 1);
+        let aligned = match (current as usize).checked_add(align - 1) {
+            Some(a) => a & !(align - 1),
+            None => return std::ptr::null_mut(),
+        };
         let next = match aligned.checked_add(size) {
             Some(n) => n,
             None => return std::ptr::null_mut(),
@@ -56,6 +65,12 @@ impl RequestArena {
 
     #[cold]
     fn alloc_overflow(&self, size: usize, align: usize) -> *mut u8 {
+        if !align.is_power_of_two() {
+            return std::ptr::null_mut();
+        }
+        if size == 0 {
+            return align as *mut u8;
+        }
         let layout = match Layout::from_size_align(size, align) {
             Ok(l) => l,
             Err(_) => return std::ptr::null_mut(),
@@ -132,5 +147,25 @@ mod tests {
 
         let ptr1 = arena.alloc(64, 8);
         assert_eq!(ptr1, arena.base_ptr);
+    }
+
+    #[test]
+    fn test_arena_zero_size_and_invalid_alignment() {
+        let arena = RequestArena::new();
+
+        // Invalid alignment (0 or non-power-of-two) returns null
+        assert!(arena.alloc(16, 0).is_null());
+        assert!(arena.alloc(16, 3).is_null());
+        assert!(arena.alloc(16, 5).is_null());
+
+        // Zero-sized allocation returns non-null, aligned dangling pointer without UB
+        let zero_ptr = arena.alloc(0, 8);
+        assert!(!zero_ptr.is_null());
+        assert_eq!((zero_ptr as usize) % 8, 0);
+
+        // Zero-sized allocation overflow also safe
+        let zero_overflow = arena.alloc_overflow(0, 16);
+        assert!(!zero_overflow.is_null());
+        assert_eq!((zero_overflow as usize) % 16, 0);
     }
 }

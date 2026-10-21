@@ -1,3 +1,3 @@
 pub mod transpiler;
 
-pub use transpiler::{ClientTranspiler, EMBEDDED_SIGNALS_CORE};
+pub use transpiler::{escape_js_string, ClientTranspiler, EMBEDDED_SIGNALS_CORE};

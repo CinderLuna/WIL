@@ -49,6 +49,13 @@ impl Type {
         }
     }
 
+    pub fn unwrap_signal(&self) -> &Type {
+        match self {
+            Type::Signal(inner) => inner.unwrap_signal(),
+            other => other,
+        }
+    }
+
     pub fn is_optional(&self) -> bool {
         matches!(self, Type::Optional(_))
     }
@@ -94,6 +101,13 @@ impl Type {
         // Signal<T> unwraps to T in expressions
         if let Type::Signal(inner) = self {
             if inner.is_assignable_to(target) {
+                return true;
+            }
+        }
+
+        // T is assignable to Signal<T> (e.g. assigning value to reactive signal variable)
+        if let Type::Signal(target_inner) = target {
+            if self.is_assignable_to(target_inner) {
                 return true;
             }
         }

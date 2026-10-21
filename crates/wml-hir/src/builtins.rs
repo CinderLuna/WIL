@@ -31,6 +31,7 @@ impl Builtins {
             "jwt" => Self::check_jwt(method, args),
             "db" => Self::check_db(method, args, models),
             "req" => Self::check_req(method, args, route_auth),
+            "res" => Self::check_res(method, args),
             _ => Err(BuiltinError::UnknownNamespace(namespace.to_string())),
         }
     }
@@ -285,6 +286,26 @@ impl Builtins {
                     ("email".to_string(), Type::Str),
                 ]))
             }
+            _ => Ok(Type::Any),
+        }
+    }
+
+    fn check_res(method: &str, args: &[HirCallArg]) -> Result<Type, BuiltinError> {
+        match method {
+            "status" => {
+                if !args.is_empty() {
+                    let code_ty = get_arg_type(&args[0]);
+                    if !code_ty.is_assignable_to(&Type::Int) {
+                        return Err(BuiltinError::TypeMismatch {
+                            expected: Type::Int,
+                            found: code_ty.clone(),
+                            param_name: "status_code".to_string(),
+                        });
+                    }
+                }
+                Ok(Type::Any)
+            }
+            "json" | "redirect" | "send" | "header" | "cookie" => Ok(Type::Any),
             _ => Ok(Type::Any),
         }
     }

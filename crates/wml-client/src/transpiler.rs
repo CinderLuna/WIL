@@ -35,6 +35,31 @@ export function effect(fn) {
 }
 "#;
 
+/// Escapes a string for safe inclusion in a JavaScript string literal or template.
+pub fn escape_js_string(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\'' => escaped.push_str("\\'"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '<' => escaped.push_str("\\x3C"),
+            '>' => escaped.push_str("\\x3E"),
+            '\u{2028}' => escaped.push_str("\\u2028"),
+            '\u{2029}' => escaped.push_str("\\u2029"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(escaped, "\\x{:02x}", c as u32);
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 pub struct ClientTranspiler;
 
 impl Default for ClientTranspiler {
@@ -176,18 +201,48 @@ impl ClientTranspiler {
         let mut code = String::new();
         code.push_str(&format!(
             "    const {} = document.createElement(\"{}\");\n",
-            el_var, elem.tag
+            el_var,
+            escape_js_string(&elem.tag)
         ));
 
         // Attributes
         for attr in &elem.attrs {
-            let is_event = attr.name.starts_with('@') || attr.name.starts_with("on");
-            let event_name = if attr.name.starts_with('@') {
-                &attr.name[1..]
-            } else if attr.name.starts_with("on") {
-                &attr.name[2..]
+            let (is_event, event_name) = if let Some(stripped) = attr.name.strip_prefix('@') {
+                (true, stripped.to_ascii_lowercase())
+            } else if attr.name.len() > 2 && attr.name.starts_with("on") {
+                let rest = &attr.name[2..];
+                let is_uppercase_jsx = rest.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+                let is_known_lowercase_dom_event = matches!(
+                    rest,
+                    "click"
+                        | "change"
+                        | "input"
+                        | "submit"
+                        | "keydown"
+                        | "keyup"
+                        | "keypress"
+                        | "blur"
+                        | "focus"
+                        | "scroll"
+                        | "reset"
+                        | "load"
+                        | "error"
+                        | "mouseenter"
+                        | "mouseleave"
+                        | "mousedown"
+                        | "mouseup"
+                        | "mousemove"
+                );
+                if is_uppercase_jsx
+                    || is_known_lowercase_dom_event
+                    || matches!(attr.value, Some(JsxAttrValue::Block(_)))
+                {
+                    (true, rest.to_ascii_lowercase())
+                } else {
+                    (false, String::new())
+                }
             } else {
-                ""
+                (false, String::new())
             };
 
             if is_event {
@@ -195,10 +250,15 @@ impl ClientTranspiler {
                     Some(JsxAttrValue::Block(block)) => {
                         code.push_str(&format!(
                             "    {}.addEventListener(\"{}\", (event) => {{\n",
-                            el_var, event_name
+                            el_var,
+                            escape_js_string(&event_name)
                         ));
                         for stmt in &block.stmts {
                             match stmt {
+                                Stmt::Let { name, val, .. } => {
+                                    let s = self.expr_to_js(*val, arena, signals)?;
+                                    code.push_str(&format!("        let {} = {};\n", name, s));
+                                }
                                 Stmt::Expr(e) => {
                                     let s = self.expr_to_js(*e, arena, signals)?;
                                     code.push_str(&format!("        {};\n", s));
@@ -211,7 +271,12 @@ impl ClientTranspiler {
                                         code.push_str("        return;\n");
                                     }
                                 }
-                                _ => {}
+                                unsupported => {
+                                    return Err(format!(
+                                        "Unsupported statement in event handler block: {:?}",
+                                        unsupported
+                                    ));
+                                }
                             }
                         }
                         code.push_str("    });\n");
@@ -220,33 +285,56 @@ impl ClientTranspiler {
                         let handler = self.expr_to_js(*e, arena, signals)?;
                         code.push_str(&format!(
                             "    {}.addEventListener(\"{}\", {});\n",
-                            el_var, event_name, handler
+                            el_var,
+                            escape_js_string(&event_name),
+                            handler
                         ));
                     }
-                    _ => {}
+                    Some(JsxAttrValue::String(_)) => {
+                        return Err(format!(
+                            "Event handler '{}' cannot have a string literal value. Use an expression or block closure.",
+                            attr.name
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "Event handler '{}' must specify a callback expression or block closure.",
+                            attr.name
+                        ));
+                    }
                 }
             } else {
                 match &attr.value {
                     Some(JsxAttrValue::String(s)) => {
                         code.push_str(&format!(
                             "    {}.setAttribute(\"{}\", \"{}\");\n",
-                            el_var, attr.name, s
+                            el_var,
+                            escape_js_string(&attr.name),
+                            escape_js_string(s)
                         ));
                     }
                     Some(JsxAttrValue::Expr(e)) => {
                         let val_expr = self.expr_to_js(*e, arena, signals)?;
                         code.push_str(&format!(
                             "    effect(() => {{ {}.setAttribute(\"{}\", {}); }});\n",
-                            el_var, attr.name, val_expr
+                            el_var,
+                            escape_js_string(&attr.name),
+                            val_expr
                         ));
                     }
                     None => {
                         code.push_str(&format!(
                             "    {}.setAttribute(\"{}\", \"\");\n",
-                            el_var, attr.name
+                            el_var,
+                            escape_js_string(&attr.name)
                         ));
                     }
-                    _ => {}
+                    Some(JsxAttrValue::Block(_)) => {
+                        return Err(format!(
+                            "Attribute '{}' cannot have a block value. Only event handlers accept block closures.",
+                            attr.name
+                        ));
+                    }
                 }
             }
         }
@@ -257,7 +345,8 @@ impl ClientTranspiler {
                 JsxChild::Text(t) => {
                     code.push_str(&format!(
                         "    {}.appendChild(document.createTextNode(\"{}\"));\n",
-                        el_var, t
+                        el_var,
+                        escape_js_string(t)
                     ));
                 }
                 JsxChild::Element(child_elem) => {
@@ -296,7 +385,7 @@ impl ClientTranspiler {
         match expr {
             Expr::Literal(Literal::Int(n)) => Ok(n.to_string()),
             Expr::Literal(Literal::Float(f)) => Ok(f.to_string()),
-            Expr::Literal(Literal::String(s)) => Ok(format!("\"{}\"", s)),
+            Expr::Literal(Literal::String(s)) => Ok(format!("\"{}\"", escape_js_string(s))),
             Expr::Literal(Literal::Bool(b)) => Ok(b.to_string()),
             Expr::Literal(Literal::Null) => Ok("null".to_string()),
             Expr::Ident(s) => {
