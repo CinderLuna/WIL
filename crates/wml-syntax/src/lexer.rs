@@ -173,9 +173,6 @@ pub enum Token {
     })]
     StringLiteral(String),
 
-    #[regex(r"/[a-zA-Z0-9_\-{][a-zA-Z0-9_\-\/{}]*", |lex| lex.slice().to_string(), priority = 3)]
-    RoutePath(String),
-
     #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().ok())]
     FloatLiteral(f64),
 

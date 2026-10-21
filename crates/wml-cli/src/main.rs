@@ -65,6 +65,7 @@ fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let current_timestamp = chrono::Utc::now().to_rfc3339();
 
     match cli.command {
         Commands::Check { file, format } => {
@@ -82,7 +83,7 @@ fn main() -> anyhow::Result<()> {
                         let report = DiagnosticReport {
                             protocol_version: "1.0.0".to_string(),
                             status: DiagnosticStatus::Success,
-                            timestamp: "2026-10-21T00:00:00Z".to_string(),
+                            timestamp: current_timestamp,
                             summary: DiagnosticSummary {
                                 total_errors: 0,
                                 total_warnings: 0,
@@ -129,7 +130,7 @@ fn main() -> anyhow::Result<()> {
                         let report = DiagnosticReport {
                             protocol_version: "1.0.0".to_string(),
                             status: DiagnosticStatus::Error,
-                            timestamp: "2026-10-21T00:00:00Z".to_string(),
+                            timestamp: current_timestamp,
                             summary: DiagnosticSummary {
                                 total_errors: 1,
                                 total_warnings: 0,

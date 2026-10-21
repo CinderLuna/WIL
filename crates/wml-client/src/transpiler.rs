@@ -1,7 +1,6 @@
 use wml_syntax::ast::*;
 
-pub const EMBEDDED_SIGNALS_CORE: &str = r#"
-// WML Embedded Micro-Signals Core (< 2.5KB gzipped)
+pub const EMBEDDED_SIGNALS_CORE: &str = r#"// WML Embedded Micro-Signals Core (< 2.5KB gzipped)
 let currentEffect = null;
 
 export function signal(initial) {
@@ -22,12 +21,16 @@ export function signal(initial) {
 }
 
 export function effect(fn) {
-    currentEffect = fn;
-    try {
-        fn();
-    } finally {
-        currentEffect = null;
-    }
+    const run = () => {
+        const prev = currentEffect;
+        currentEffect = run;
+        try {
+            fn();
+        } finally {
+            currentEffect = prev;
+        }
+    };
+    run();
 }
 "#;
 
@@ -44,60 +47,56 @@ impl ClientTranspiler {
         Self
     }
 
-    pub fn transpile_island(&self, ui: &UiDecl, arena: &AstArena) -> String {
+    pub fn transpile_island(&self, ui: &UiDecl, arena: &AstArena) -> Result<String, String> {
         let mut js = String::new();
         js.push_str(EMBEDDED_SIGNALS_CORE);
         js.push_str("\n\n");
 
-        // Component declaration
         js.push_str(&format!(
             "export function mount_{}(container, props = {{}}) {{\n",
             ui.name
         ));
 
-        // Transpile statements (signals, actions, etc.)
+        let mut var_counter = 0;
+
         for stmt in &ui.body.stmts {
             match stmt {
                 Stmt::Let { name, val, .. } => {
                     let expr = arena.get_expr(*val);
-                    match expr {
-                        Expr::Call { callee, args } => {
-                            if let Expr::Ident(callee_name) = arena.get_expr(*callee) {
-                                if callee_name == "signal" {
-                                    let arg_code = if let Some(arg) = args.first() {
-                                        match arg {
-                                            CallArg::Positional(e) => self.expr_to_js(*e, arena),
-                                            CallArg::Named { val, .. } => {
-                                                self.expr_to_js(*val, arena)
-                                            }
-                                        }
-                                    } else {
-                                        "undefined".to_string()
-                                    };
-                                    js.push_str(&format!(
-                                        "    const {} = signal(props.{} ?? {});\n",
-                                        name, name, arg_code
-                                    ));
-                                } else {
-                                    js.push_str(&format!(
-                                        "    let {} = {};\n",
-                                        name,
-                                        self.expr_to_js(*val, arena)
-                                    ));
-                                }
+                    let mut is_signal = false;
+                    let mut signal_arg = None;
+
+                    if let Expr::Call { callee, args } = expr {
+                        if let Expr::Ident(callee_name) = arena.get_expr(*callee) {
+                            if callee_name == "signal" {
+                                is_signal = true;
+                                signal_arg = args.first();
                             }
                         }
-                        _ => {
-                            js.push_str(&format!(
-                                "    let {} = {};\n",
-                                name,
-                                self.expr_to_js(*val, arena)
-                            ));
-                        }
+                    }
+
+                    if is_signal {
+                        let arg_code = if let Some(arg) = signal_arg {
+                            match arg {
+                                CallArg::Positional(e) => self.expr_to_js(*e, arena)?,
+                                CallArg::Named { val, .. } => self.expr_to_js(*val, arena)?,
+                            }
+                        } else {
+                            "undefined".to_string()
+                        };
+                        js.push_str(&format!(
+                            "    const {} = signal(props.{} ?? {});\n",
+                            name, name, arg_code
+                        ));
+                    } else {
+                        js.push_str(&format!(
+                            "    let {} = {};\n",
+                            name,
+                            self.expr_to_js(*val, arena)?
+                        ));
                     }
                 }
                 Stmt::Action { name, params, .. } => {
-                    // Generate typed RPC action wrapper
                     let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                     let params_str = param_names.join(", ");
                     let payload_props: Vec<String> = param_names
@@ -124,11 +123,20 @@ impl ClientTranspiler {
                 Stmt::Expr(expr_id) => {
                     let expr = arena.get_expr(*expr_id);
                     if let Expr::Jsx(jsx) = expr {
-                        js.push_str("    // Mounting JSX root\n");
-                        js.push_str(&format!(
-                            "    container.innerHTML = `<{tag} class=\"counter-card\"></{tag}>`;\n",
-                            tag = jsx.tag
-                        ));
+                        let (root_var, jsx_code) =
+                            self.transpile_jsx(jsx, arena, &mut var_counter)?;
+                        js.push_str(&jsx_code);
+                        js.push_str(&format!("    container.appendChild({});\n", root_var));
+                    } else {
+                        let code = self.expr_to_js(*expr_id, arena)?;
+                        js.push_str(&format!("    {};\n", code));
+                    }
+                }
+                Stmt::Return(ret_expr) => {
+                    if let Some(e) = ret_expr {
+                        js.push_str(&format!("    return {};\n", self.expr_to_js(*e, arena)?));
+                    } else {
+                        js.push_str("    return;\n");
                     }
                 }
                 _ => {}
@@ -136,17 +144,150 @@ impl ClientTranspiler {
         }
 
         js.push_str("}\n");
-        js
+        Ok(js)
     }
 
-    fn expr_to_js(&self, id: ExprId, arena: &AstArena) -> String {
-        match arena.get_expr(id) {
-            Expr::Literal(Literal::Int(n)) => n.to_string(),
-            Expr::Literal(Literal::Float(f)) => f.to_string(),
-            Expr::Literal(Literal::String(s)) => format!("\"{}\"", s),
-            Expr::Literal(Literal::Bool(b)) => b.to_string(),
-            Expr::Literal(Literal::Null) => "null".to_string(),
-            Expr::Ident(s) => s.clone(),
+    fn transpile_jsx(
+        &self,
+        elem: &JsxElement,
+        arena: &AstArena,
+        var_gen: &mut usize,
+    ) -> Result<(String, String), String> {
+        let el_var = format!("_el{}", *var_gen);
+        *var_gen += 1;
+
+        let mut code = String::new();
+        code.push_str(&format!(
+            "    const {} = document.createElement(\"{}\");\n",
+            el_var, elem.tag
+        ));
+
+        // Attributes
+        for attr in &elem.attrs {
+            let is_event = attr.name.starts_with('@') || attr.name.starts_with("on");
+            let event_name = if attr.name.starts_with('@') {
+                &attr.name[1..]
+            } else if attr.name.starts_with("on") {
+                &attr.name[2..]
+            } else {
+                ""
+            };
+
+            if is_event {
+                match &attr.value {
+                    Some(JsxAttrValue::Block(block)) => {
+                        code.push_str(&format!(
+                            "    {}.addEventListener(\"{}\", (event) => {{\n",
+                            el_var, event_name
+                        ));
+                        for stmt in &block.stmts {
+                            match stmt {
+                                Stmt::Expr(e) => {
+                                    let s = self.expr_to_js(*e, arena)?;
+                                    code.push_str(&format!("        {};\n", s));
+                                }
+                                Stmt::Return(r) => {
+                                    if let Some(e) = r {
+                                        let s = self.expr_to_js(*e, arena)?;
+                                        code.push_str(&format!("        return {};\n", s));
+                                    } else {
+                                        code.push_str("        return;\n");
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        code.push_str("    });\n");
+                    }
+                    Some(JsxAttrValue::Expr(e)) => {
+                        let handler = self.expr_to_js(*e, arena)?;
+                        code.push_str(&format!(
+                            "    {}.addEventListener(\"{}\", {});\n",
+                            el_var, event_name, handler
+                        ));
+                    }
+                    _ => {}
+                }
+            } else {
+                match &attr.value {
+                    Some(JsxAttrValue::String(s)) => {
+                        code.push_str(&format!(
+                            "    {}.setAttribute(\"{}\", \"{}\");\n",
+                            el_var, attr.name, s
+                        ));
+                    }
+                    Some(JsxAttrValue::Expr(e)) => {
+                        let val_expr = self.expr_to_js(*e, arena)?;
+                        code.push_str(&format!(
+                            "    effect(() => {{ {}.setAttribute(\"{}\", {}); }});\n",
+                            el_var, attr.name, val_expr
+                        ));
+                    }
+                    None => {
+                        code.push_str(&format!(
+                            "    {}.setAttribute(\"{}\", \"\");\n",
+                            el_var, attr.name
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Children
+        for child in &elem.children {
+            match child {
+                JsxChild::Text(t) => {
+                    code.push_str(&format!(
+                        "    {}.appendChild(document.createTextNode(\"{}\"));\n",
+                        el_var, t
+                    ));
+                }
+                JsxChild::Element(child_elem) => {
+                    let (child_var, child_code) = self.transpile_jsx(child_elem, arena, var_gen)?;
+                    code.push_str(&child_code);
+                    code.push_str(&format!("    {}.appendChild({});\n", el_var, child_var));
+                }
+                JsxChild::Expr(expr_id) => {
+                    let node_var = format!("_t{}", *var_gen);
+                    *var_gen += 1;
+                    let val_expr = self.expr_to_js(*expr_id, arena)?;
+                    code.push_str(&format!(
+                        "    const {} = document.createTextNode(\"\");\n",
+                        node_var
+                    ));
+                    code.push_str(&format!("    {}.appendChild({});\n", el_var, node_var));
+                    code.push_str(&format!(
+                        "    effect(() => {{ {}.textContent = {}; }});\n",
+                        node_var, val_expr
+                    ));
+                }
+            }
+        }
+
+        Ok((el_var, code))
+    }
+
+    pub fn expr_to_js(&self, id: ExprId, arena: &AstArena) -> Result<String, String> {
+        let expr = arena.get_expr(id);
+        match expr {
+            Expr::Literal(Literal::Int(n)) => Ok(n.to_string()),
+            Expr::Literal(Literal::Float(f)) => Ok(f.to_string()),
+            Expr::Literal(Literal::String(s)) => Ok(format!("\"{}\"", s)),
+            Expr::Literal(Literal::Bool(b)) => Ok(b.to_string()),
+            Expr::Literal(Literal::Null) => Ok("null".to_string()),
+            Expr::Ident(s) => {
+                // In client reactive code, accessing signal value uses `.val` if it's a known identifier
+                Ok(s.clone())
+            }
+            Expr::Unary { op, expr } => {
+                let op_str = match op {
+                    UnaryOp::Not => "!",
+                    UnaryOp::Neg => "-",
+                };
+                let inner = self.expr_to_js(*expr, arena)?;
+                Ok(format!("({}{})", op_str, inner))
+            }
             Expr::Binary { op, lhs, rhs } => {
                 let op_str = match op {
                     BinaryOp::Add => "+",
@@ -166,28 +307,47 @@ impl ClientTranspiler {
                     BinaryOp::AddAssign => "+=",
                     BinaryOp::SubAssign => "-=",
                 };
-                format!(
-                    "({} {} {})",
-                    self.expr_to_js(*lhs, arena),
-                    op_str,
-                    self.expr_to_js(*rhs, arena)
-                )
+                let l = self.expr_to_js(*lhs, arena)?;
+                let r = self.expr_to_js(*rhs, arena)?;
+                Ok(format!("({} {} {})", l, op_str, r))
             }
             Expr::MemberAccess { object, field } => {
-                format!("{}.{}", self.expr_to_js(*object, arena), field)
+                let obj = self.expr_to_js(*object, arena)?;
+                Ok(format!("{}.{}", obj, field))
             }
             Expr::Call { callee, args } => {
-                let callee_js = self.expr_to_js(*callee, arena);
-                let args_js: Vec<String> = args
+                let callee_js = self.expr_to_js(*callee, arena)?;
+                let args_js: Result<Vec<String>, String> = args
                     .iter()
                     .map(|a| match a {
                         CallArg::Positional(e) => self.expr_to_js(*e, arena),
                         CallArg::Named { val, .. } => self.expr_to_js(*val, arena),
                     })
                     .collect();
-                format!("{}({})", callee_js, args_js.join(", "))
+                Ok(format!("{}({})", callee_js, args_js?.join(", ")))
             }
-            _ => "null".to_string(),
+            Expr::ArrayLit(items) => {
+                let items_js: Result<Vec<String>, String> =
+                    items.iter().map(|e| self.expr_to_js(*e, arena)).collect();
+                Ok(format!("[{}]", items_js?.join(", ")))
+            }
+            Expr::ObjectLit(fields) => {
+                let fields_js: Result<Vec<String>, String> = fields
+                    .iter()
+                    .map(|f| match &f.val {
+                        Some(v) => {
+                            let val_str = self.expr_to_js(*v, arena)?;
+                            Ok(format!("{}: {}", f.name, val_str))
+                        }
+                        None => Ok(f.name.clone()),
+                    })
+                    .collect();
+                Ok(format!("{{ {} }}", fields_js?.join(", ")))
+            }
+            unsupported => Err(format!(
+                "Unsupported client expression variant: {:?}",
+                unsupported
+            )),
         }
     }
 }

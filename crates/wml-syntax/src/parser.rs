@@ -2,6 +2,8 @@ use crate::ast::*;
 use crate::lexer::{SpannedToken, Token};
 use std::ops::Range;
 
+const PREFIX_BP: u8 = 17;
+
 #[derive(Debug, Clone)]
 pub struct ParseError {
     pub message: String,
@@ -9,14 +11,16 @@ pub struct ParseError {
 }
 
 pub struct Parser<'a> {
+    source: &'a str,
     tokens: &'a [SpannedToken],
     pos: usize,
     arena: &'a mut AstArena,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(tokens: &'a [SpannedToken], arena: &'a mut AstArena) -> Self {
+    pub fn new(source: &'a str, tokens: &'a [SpannedToken], arena: &'a mut AstArena) -> Self {
         Self {
+            source,
             tokens,
             pos: 0,
             arena,
@@ -28,10 +32,13 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_span(&self) -> Range<usize> {
-        self.tokens
-            .get(self.pos)
-            .map(|st| st.span.clone())
-            .unwrap_or(0..0)
+        match self.tokens.get(self.pos) {
+            Some(st) => st.span.clone(),
+            None => {
+                let end = self.tokens.last().map(|st| st.span.end).unwrap_or(0);
+                end..end
+            }
+        }
     }
 
     fn has_leading_newline(&self) -> bool {
@@ -317,25 +324,30 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_path(&mut self) -> Result<String, ParseError> {
-        match self.peek() {
-            Some(Token::RoutePath(p)) => {
-                let p = p.clone();
+        let start = self.expect(Token::Slash)?.start;
+        let mut end = start + 1;
+
+        while self.pos < self.tokens.len() && self.tokens[self.pos].span.start == end {
+            let tok = &self.tokens[self.pos].token;
+            let is_path_part = matches!(
+                tok,
+                Token::Slash
+                    | Token::Ident(_)
+                    | Token::IntLiteral(_)
+                    | Token::Minus
+                    | Token::LBrace
+                    | Token::RBrace
+            ) || tok.as_ident().is_some();
+
+            if is_path_part {
+                end = self.tokens[self.pos].span.end;
                 self.advance();
-                Ok(p)
+            } else {
+                break;
             }
-            Some(Token::Slash) => {
-                self.advance();
-                Ok("/".to_string())
-            }
-            Some(other) => Err(ParseError {
-                message: format!("Expected route path starting with '/', found {:?}", other),
-                span: self.peek_span(),
-            }),
-            None => Err(ParseError {
-                message: "Expected route path, found end of file".to_string(),
-                span: self.peek_span(),
-            }),
         }
+
+        Ok(self.source[start..end].to_string())
     }
 
     fn parse_route_config(&mut self) -> Result<RouteConfig, ParseError> {
@@ -746,7 +758,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(Token::Bang) => {
                 self.advance();
-                let expr = self.parse_expr(9)?;
+                let expr = self.parse_expr(PREFIX_BP)?;
                 Ok(self.arena.alloc_expr(Expr::Unary {
                     op: UnaryOp::Not,
                     expr,
@@ -754,7 +766,7 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Minus) => {
                 self.advance();
-                let expr = self.parse_expr(9)?;
+                let expr = self.parse_expr(PREFIX_BP)?;
                 Ok(self.arena.alloc_expr(Expr::Unary {
                     op: UnaryOp::Neg,
                     expr,

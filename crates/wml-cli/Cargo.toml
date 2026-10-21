@@ -21,3 +21,4 @@ wml-client = { path = "../wml-client" }
 clap = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }

@@ -10,7 +10,7 @@ pub fn parse(source: &str) -> Result<(Program, AstArena), ParseError> {
     let tokens = tokenize(source).map_err(|(message, span)| ParseError { message, span })?;
     let mut arena = AstArena::new();
     let program = {
-        let mut parser = Parser::new(&tokens, &mut arena);
+        let mut parser = Parser::new(source, &tokens, &mut arena);
         parser.parse_program()?
     };
     Ok((program, arena))
