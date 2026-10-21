@@ -13,3 +13,8 @@ llvm-backend = []
 wml-mir = { path = "../wml-mir" }
 wml-diagnostics = { path = "../wml-diagnostics" }
 thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+wml-syntax = { path = "../wml-syntax" }
+wml-hir = { path = "../wml-hir" }

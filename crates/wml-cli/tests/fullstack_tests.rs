@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use wml_client::ClientTranspiler;
 use wml_codegen_cranelift::CraneliftJitBackend;
+use wml_codegen_llvm::*;
 use wml_hir::check;
 use wml_mir::{EscapeAnalysis, MirLowerer, MirOptimizer};
 use wml_runtime::abi::*;
@@ -89,6 +90,68 @@ fn test_wml_build_counter_produces_manifest_and_islands_js() {
 
     assert!(manifest_path.exists());
     assert!(bundle_path.exists());
+    let _ = fs::remove_dir_all(&out_dir);
+}
+
+#[test]
+fn test_wml_build_release_produces_llvm_ir_and_dual_arch_binaries() {
+    let source = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/counter.wml"
+    ))
+    .unwrap();
+
+    let (program, arena) = parse(&source).unwrap();
+    let (hir, diags) = check(&program, &arena, &source, "counter.wml");
+    assert!(diags.is_empty(), "Typecheck errors: {:?}", diags);
+
+    let lowerer = MirLowerer::new();
+    let mut mir_module = lowerer.lower_program(&hir);
+
+    let escape = EscapeAnalysis::new();
+    escape.run_on_module(&mut mir_module);
+
+    let opt = MirOptimizer::new();
+    opt.optimize_module(&mut mir_module);
+
+    let out_dir = PathBuf::from("target/test_dist_release");
+    let _ = fs::remove_dir_all(&out_dir);
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // 1. Compile x86_64 target
+    let x86_target = TargetConfig::x86_64_linux();
+    let compiler = LlvmCompiler::new();
+    let x86_ir = compiler.compile_to_ir(&mir_module, &x86_target).unwrap();
+    assert!(x86_ir.contains("target triple = \"x86_64-unknown-linux-gnu\""));
+    assert!(x86_ir.contains("define i32 @main("));
+
+    let ir_path = out_dir.join("app.ll");
+    fs::write(&ir_path, &x86_ir).unwrap();
+    assert!(ir_path.exists());
+
+    // 2. Compile aarch64 (ARM64) target
+    let arm_target = TargetConfig::aarch64_linux();
+    let arm_ir = compiler.compile_to_ir(&mir_module, &arm_target).unwrap();
+    assert!(arm_ir.contains("target triple = \"aarch64-unknown-linux-gnu\""));
+    assert!(arm_ir.contains("define i32 @main("));
+
+    // 3. If clang is available, verify object compilation for both targets
+    if LlvmCompiler::is_clang_available() {
+        let x86_obj = out_dir.join("app_x86_64.o");
+        compiler
+            .compile_to_object(&x86_ir, &x86_target, &x86_obj)
+            .unwrap();
+        assert!(x86_obj.exists());
+        assert!(fs::metadata(&x86_obj).unwrap().len() > 0);
+
+        let arm_obj = out_dir.join("app_aarch64.o");
+        compiler
+            .compile_to_object(&arm_ir, &arm_target, &arm_obj)
+            .unwrap();
+        assert!(arm_obj.exists());
+        assert!(fs::metadata(&arm_obj).unwrap().len() > 0);
+    }
+
     let _ = fs::remove_dir_all(&out_dir);
 }
 

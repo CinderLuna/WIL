@@ -203,6 +203,7 @@ pub unsafe extern "C" fn wml_db_get(
     let record_ptr = arena_ref.alloc(48, 8);
     if !record_ptr.is_null() {
         *(record_ptr as *mut i64) = 1;
+        *((record_ptr as *mut i64).add(1)) = 1;
     }
     record_ptr
 }
@@ -221,6 +222,7 @@ pub unsafe extern "C" fn wml_db_update(
     let record_ptr = arena_ref.alloc(48, 8);
     if !record_ptr.is_null() {
         *(record_ptr as *mut i64) = 1;
+        *((record_ptr as *mut i64).add(1)) = 1;
     }
     record_ptr
 }
