@@ -3,7 +3,7 @@
 > **The ultra-low-memory, horizontal-scaling, full-stack web language engineered for autonomous coding agents and LLMs.**
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-52%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-58%20passed-brightgreen.svg)]()
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg)]()
 [![Memory](https://img.shields.io/badge/idle%20RAM-%3C%202.5MB-blueviolet.svg)]()
 

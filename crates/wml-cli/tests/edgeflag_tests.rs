@@ -240,4 +240,64 @@ fn test_edgeflag_jit_runtime_dispatch() {
     let rpc_code = unsafe { rpc_handler(arena_ptr, &rpc_req, &mut rpc_res) };
     assert_eq!(rpc_code, 0);
     assert_eq!(rpc_res.status, 200);
+
+    // 3. Dispatch POST /api/v1/auth/provision (Auth API route with native Argon2id + JWT)
+    let auth_route = compiled
+        .routes
+        .iter()
+        .find(|r| r.method == "POST" && r.path == "/api/v1/auth/provision")
+        .expect("Auth route `/api/v1/auth/provision` not registered");
+
+    let auth_req = WmlHttpRequest {
+        method: WmlSlice::from_slice(b"POST"),
+        path: WmlSlice::from_slice(b"/api/v1/auth/provision"),
+        body: WmlSlice::from_slice(b"{\"name\": \"edge-agent-01\", \"secret\": \"supersecret\"}"),
+        headers: std::ptr::null(),
+        num_headers: 0,
+    };
+    let mut auth_res = WmlHttpResponse::new();
+    let auth_handler: RouteHandlerFn = unsafe { std::mem::transmute(auth_route.fn_ptr) };
+    let auth_code = unsafe { auth_handler(arena_ptr, &auth_req, &mut auth_res) };
+    assert_eq!(auth_code, 0);
+    assert_eq!(auth_res.status, 200);
+
+    // 4. Dispatch POST /api/v1/evaluate (Flag evaluation endpoint)
+    let eval_route = compiled
+        .routes
+        .iter()
+        .find(|r| r.method == "POST" && r.path == "/api/v1/evaluate")
+        .expect("Eval route `/api/v1/evaluate` not registered");
+
+    let eval_req = WmlHttpRequest {
+        method: WmlSlice::from_slice(b"POST"),
+        path: WmlSlice::from_slice(b"/api/v1/evaluate"),
+        body: WmlSlice::from_slice(b"{\"key\": \"dark_mode_v2\", \"entity_id\": \"usr_42\"}"),
+        headers: std::ptr::null(),
+        num_headers: 0,
+    };
+    let mut eval_res = WmlHttpResponse::new();
+    let eval_handler: RouteHandlerFn = unsafe { std::mem::transmute(eval_route.fn_ptr) };
+    let eval_code = unsafe { eval_handler(arena_ptr, &eval_req, &mut eval_res) };
+    assert_eq!(eval_code, 0);
+    assert_eq!(eval_res.status, 200);
+
+    // 5. Dispatch GET /api/v1/flags/sync (Sync endpoint)
+    let sync_route = compiled
+        .routes
+        .iter()
+        .find(|r| r.method == "GET" && r.path == "/api/v1/flags/sync")
+        .expect("Sync route `/api/v1/flags/sync` not registered");
+
+    let sync_req = WmlHttpRequest {
+        method: WmlSlice::from_slice(b"GET"),
+        path: WmlSlice::from_slice(b"/api/v1/flags/sync"),
+        body: WmlSlice::empty(),
+        headers: std::ptr::null(),
+        num_headers: 0,
+    };
+    let mut sync_res = WmlHttpResponse::new();
+    let sync_handler: RouteHandlerFn = unsafe { std::mem::transmute(sync_route.fn_ptr) };
+    let sync_code = unsafe { sync_handler(arena_ptr, &sync_req, &mut sync_res) };
+    assert_eq!(sync_code, 0);
+    assert_eq!(sync_res.status, 200);
 }
