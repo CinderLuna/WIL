@@ -3,7 +3,7 @@
 > **The ultra-low-memory, horizontal-scaling, full-stack web language engineered for autonomous coding agents and LLMs.**
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-48%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-58%20passed-brightgreen.svg)]()
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg)]()
 [![Memory](https://img.shields.io/badge/idle%20RAM-%3C%202.5MB-blueviolet.svg)]()
 
@@ -163,6 +163,31 @@ ui ClickIsland(initial: int) {
 }
 ```
 
+### Real-Time Edge Feature Flag & Remote Config Control Plane (`examples/edgeflag.wml`)
+```wml
+// EdgeFlag: Real-Time Edge Feature Flag & Dynamic Remote Config Engine
+// Single-file colocation: Schemas + SSR Dashboard + Reactive Micro-Signals Islands + High-Throughput Edge API
+// Ultra-low memory density (<2.5MB RAM), zero GC latency, bump arena allocation, dual-target LLVM & Cranelift.
+
+schema Flag {
+    id: int pk auto,
+    key: str,
+    name: str,
+    description: str,
+    enabled: bool default(false),
+    rollout_percentage: int default(0),
+    environment: str default("production")
+}
+
+schema Metric {
+    id: int pk auto,
+    evaluations: int default(0),
+    active_flags: int default(0)
+}
+
+// Full Walkthrough: docs/examples/EDGEFLAG_WALKTHROUGH.md
+```
+
 ---
 
 ## 5. Specification Roadmap & Milestone Status
@@ -188,6 +213,7 @@ ui ClickIsland(initial: int) {
 - [Phase 4 Full-Stack & Island Hydration Guide](docs/phase4_fullstack_and_bundler_guide.md)
 - [Phase 5 LLVM AOT Release Pipeline Guide](docs/phase5_llvm_aot_guide.md)
 - [Phase 6 AI Diagnostic & Self-Healing Guide](docs/phase6_ai_diagnostics_guide.md)
+- [EdgeFlag Full-Stack Walkthrough & Architecture](docs/examples/EDGEFLAG_WALKTHROUGH.md)
 - [Developer & AI Operations Manual](AGENTS.md)
 
 ---
