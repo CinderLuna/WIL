@@ -1,4 +1,5 @@
 use la_arena::{Arena, Idx};
+use serde::{Deserialize, Serialize};
 
 pub type ExprId = Idx<Expr>;
 
@@ -23,7 +24,7 @@ pub struct TypeDecl {
     pub fields: Vec<FieldDef>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldDef {
     pub name: String,
     pub ty: TypeRef,
@@ -67,7 +68,7 @@ pub struct RouteConfig {
     pub rate_limit: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HttpMethod {
     Post,
     Get,
@@ -104,7 +105,7 @@ pub struct Param {
     pub default: Option<ExprId>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeRef {
     Int,
     Float,
@@ -190,7 +191,7 @@ pub enum Expr {
     Jsx(Box<JsxElement>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Literal {
     String(String),
     Int(i64),
@@ -199,7 +200,7 @@ pub enum Literal {
     Null,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
     Assign,
     Add,
@@ -220,7 +221,7 @@ pub enum BinaryOp {
     SubAssign,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnaryOp {
     Neg,
     Not,
@@ -243,6 +244,7 @@ pub struct JsxElement {
     pub tag: String,
     pub attrs: Vec<JsxAttr>,
     pub children: Vec<JsxChild>,
+    pub span: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -265,9 +267,10 @@ pub enum JsxChild {
     Text(String),
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, PartialEq)]
 pub struct AstArena {
     pub exprs: Arena<Expr>,
+    pub spans: Vec<std::ops::Range<usize>>,
 }
 
 impl AstArena {
@@ -275,11 +278,22 @@ impl AstArena {
         Self::default()
     }
 
-    pub fn alloc_expr(&mut self, expr: Expr) -> ExprId {
-        self.exprs.alloc(expr)
+    pub fn alloc_expr(&mut self, expr: Expr, span: std::ops::Range<usize>) -> ExprId {
+        let id = self.exprs.alloc(expr);
+        let idx = id.into_raw().into_u32() as usize;
+        if idx >= self.spans.len() {
+            self.spans.resize(idx + 1, 0..0);
+        }
+        self.spans[idx] = span;
+        id
     }
 
     pub fn get_expr(&self, id: ExprId) -> &Expr {
         &self.exprs[id]
+    }
+
+    pub fn get_span(&self, id: ExprId) -> std::ops::Range<usize> {
+        let idx = id.into_raw().into_u32() as usize;
+        self.spans.get(idx).cloned().unwrap_or(0..0)
     }
 }

@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
 use wml_diagnostics::{
-    ByteRange, Diagnostic, DiagnosticReport, DiagnosticSeverity, DiagnosticStatus,
-    DiagnosticSummary, Location, Span,
+    ByteRange, Diagnostic, DiagnosticCategory, DiagnosticReport, DiagnosticSeverity,
+    DiagnosticStatus, DiagnosticSummary, Location, Span,
 };
 use wml_syntax::parse;
 
@@ -85,7 +85,7 @@ fn main() -> anyhow::Result<()> {
                             diagnostics: vec![Diagnostic {
                                 id: "diag_io_001".to_string(),
                                 code: "WML-IO-1001".to_string(),
-                                category: "IoError".to_string(),
+                                category: DiagnosticCategory::RuntimePanic,
                                 severity: DiagnosticSeverity::Error,
                                 message: format!("Failed to read file {}: {}", file.display(), err),
                                 primary_location: Location {
@@ -110,26 +110,67 @@ fn main() -> anyhow::Result<()> {
             };
 
             match parse(&source) {
-                Ok((program, _arena)) => {
+                Ok((program, arena)) => {
+                    let file_str = file.display().to_string();
+                    let (_hir, diags) = wml_hir::check(&program, &arena, &source, &file_str);
+
+                    let total_errors = diags
+                        .iter()
+                        .filter(|d| d.severity == DiagnosticSeverity::Error)
+                        .count();
+                    let total_warnings = diags
+                        .iter()
+                        .filter(|d| d.severity == DiagnosticSeverity::Warning)
+                        .count();
+                    let auto_fixable = diags.iter().filter(|d| d.suggested_patch.is_some()).count();
+
                     if format == "ai-json" {
+                        let status = if total_errors > 0 {
+                            DiagnosticStatus::Error
+                        } else if total_warnings > 0 {
+                            DiagnosticStatus::Warning
+                        } else {
+                            DiagnosticStatus::Success
+                        };
+
                         let report = DiagnosticReport {
                             protocol_version: "1.0.0".to_string(),
-                            status: DiagnosticStatus::Success,
+                            status,
                             timestamp: current_timestamp,
                             summary: DiagnosticSummary {
-                                total_errors: 0,
-                                total_warnings: 0,
-                                auto_fixable: 0,
+                                total_errors,
+                                total_warnings,
+                                auto_fixable,
                             },
-                            diagnostics: vec![],
+                            diagnostics: diags,
                         };
                         println!("{}", serde_json::to_string_pretty(&report)?);
+                        if total_errors > 0 {
+                            std::process::exit(1);
+                        }
                     } else {
-                        println!(
-                            "Checking {}... OK ({} top-level items parsed, 0 errors)",
-                            file.display(),
-                            program.items.len()
-                        );
+                        if total_errors > 0 {
+                            for d in &diags {
+                                eprintln!(
+                                    "Error [{}] in {}:{}:{}: {}",
+                                    d.code,
+                                    d.primary_location.file,
+                                    d.primary_location.span.start_line,
+                                    d.primary_location.span.start_col,
+                                    d.message
+                                );
+                                if let Some(patch) = &d.suggested_patch {
+                                    eprintln!("  Suggested fix: {}", patch.explanation);
+                                }
+                            }
+                            std::process::exit(1);
+                        } else {
+                            println!(
+                                "Checking {}... OK ({} top-level items parsed and typechecked, 0 errors)",
+                                file.display(),
+                                program.items.len()
+                            );
+                        }
                     }
                 }
                 Err(parse_err) => {
@@ -139,7 +180,7 @@ fn main() -> anyhow::Result<()> {
                     let diagnostic = Diagnostic {
                         id: format!("diag_{:x}", parse_err.span.start),
                         code: "WML-SYN-1001".to_string(),
-                        category: "SyntaxError".to_string(),
+                        category: DiagnosticCategory::SyntaxError,
                         severity: DiagnosticSeverity::Error,
                         message: parse_err.message.clone(),
                         primary_location: Location {

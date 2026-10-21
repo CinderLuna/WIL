@@ -25,11 +25,24 @@ pub struct DiagnosticSummary {
     pub auto_fixable: usize,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DiagnosticCategory {
+    SyntaxError,
+    TypeMismatch,
+    UndefinedIdentifier,
+    UncheckedNullability,
+    SecurityViolation,
+    DatabaseConstraint,
+    RoutingConflict,
+    UnusedDeclaration,
+    RuntimePanic,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Diagnostic {
     pub id: String,
     pub code: String,
-    pub category: String,
+    pub category: DiagnosticCategory,
     pub severity: DiagnosticSeverity,
     pub message: String,
     pub primary_location: Location,

@@ -657,16 +657,22 @@ impl<'a> Parser<'a> {
             // Postfix: member access (.field) or call (...)
             if self.peek() == Some(&Token::Dot) {
                 self.advance();
-                let (field, _) = self.expect_ident()?;
+                let (field, field_span) = self.expect_ident()?;
+                let start = self.arena.get_span(lhs).start;
+                let end = field_span.end;
                 lhs = self
                     .arena
-                    .alloc_expr(Expr::MemberAccess { object: lhs, field });
+                    .alloc_expr(Expr::MemberAccess { object: lhs, field }, start..end);
                 continue;
             }
 
             if self.peek() == Some(&Token::LParen) {
-                let args = self.parse_call_args()?;
-                lhs = self.arena.alloc_expr(Expr::Call { callee: lhs, args });
+                let (args, rparen_span) = self.parse_call_args()?;
+                let start = self.arena.get_span(lhs).start;
+                let end = rparen_span.end;
+                lhs = self
+                    .arena
+                    .alloc_expr(Expr::Call { callee: lhs, args }, start..end);
                 continue;
             }
 
@@ -723,11 +729,12 @@ impl<'a> Parser<'a> {
 
             // Special case: `?? throw 401 "..."`
             let rhs = if op == BinaryOp::Coalesce && self.peek() == Some(&Token::Throw) {
-                self.advance();
-                let code = if let Some(Token::IntLiteral(c)) = self.peek() {
+                let throw_span = self.expect(Token::Throw)?;
+                let (code, code_span) = if let Some(Token::IntLiteral(c)) = self.peek() {
                     let c = *c;
+                    let s = self.peek_span();
                     self.advance();
-                    c
+                    (c, s)
                 } else {
                     return Err(ParseError {
                         message:
@@ -736,21 +743,28 @@ impl<'a> Parser<'a> {
                         span: self.peek_span(),
                     });
                 };
-                let msg = if self.peek() != Some(&Token::Semicolon)
+                let (msg, end) = if self.peek() != Some(&Token::Semicolon)
                     && self.peek() != Some(&Token::RBrace)
                     && self.peek() != Some(&Token::RParen)
                     && self.peek().is_some()
                 {
-                    Some(self.parse_expr(r_bp)?)
+                    let m = self.parse_expr(r_bp)?;
+                    let e = self.arena.get_span(m).end;
+                    (Some(m), e)
                 } else {
-                    None
+                    (None, code_span.end)
                 };
-                self.arena.alloc_expr(Expr::Throw { code, message: msg })
+                self.arena
+                    .alloc_expr(Expr::Throw { code, message: msg }, throw_span.start..end)
             } else {
                 self.parse_expr(r_bp)?
             };
 
-            lhs = self.arena.alloc_expr(Expr::Binary { op, lhs, rhs });
+            let start = self.arena.get_span(lhs).start;
+            let end = self.arena.get_span(rhs).end;
+            lhs = self
+                .arena
+                .alloc_expr(Expr::Binary { op, lhs, rhs }, start..end);
         }
 
         Ok(lhs)
@@ -759,20 +773,28 @@ impl<'a> Parser<'a> {
     fn parse_prefix_expr(&mut self) -> Result<ExprId, ParseError> {
         match self.peek() {
             Some(Token::Bang) => {
-                self.advance();
+                let op_span = self.expect(Token::Bang)?;
                 let expr = self.parse_expr(PREFIX_BP)?;
-                Ok(self.arena.alloc_expr(Expr::Unary {
-                    op: UnaryOp::Not,
-                    expr,
-                }))
+                let end = self.arena.get_span(expr).end;
+                Ok(self.arena.alloc_expr(
+                    Expr::Unary {
+                        op: UnaryOp::Not,
+                        expr,
+                    },
+                    op_span.start..end,
+                ))
             }
             Some(Token::Minus) => {
-                self.advance();
+                let op_span = self.expect(Token::Minus)?;
                 let expr = self.parse_expr(PREFIX_BP)?;
-                Ok(self.arena.alloc_expr(Expr::Unary {
-                    op: UnaryOp::Neg,
-                    expr,
-                }))
+                let end = self.arena.get_span(expr).end;
+                Ok(self.arena.alloc_expr(
+                    Expr::Unary {
+                        op: UnaryOp::Neg,
+                        expr,
+                    },
+                    op_span.start..end,
+                ))
             }
             _ => self.parse_primary_expr(),
         }
@@ -784,29 +806,37 @@ impl<'a> Parser<'a> {
             Some(Token::IntLiteral(n)) => {
                 let n = *n;
                 self.advance();
-                Ok(self.arena.alloc_expr(Expr::Literal(Literal::Int(n))))
+                Ok(self.arena.alloc_expr(Expr::Literal(Literal::Int(n)), span))
             }
             Some(Token::FloatLiteral(f)) => {
                 let f = *f;
                 self.advance();
-                Ok(self.arena.alloc_expr(Expr::Literal(Literal::Float(f))))
+                Ok(self
+                    .arena
+                    .alloc_expr(Expr::Literal(Literal::Float(f)), span))
             }
             Some(Token::StringLiteral(s)) => {
                 let s = s.clone();
                 self.advance();
-                Ok(self.arena.alloc_expr(Expr::Literal(Literal::String(s))))
+                Ok(self
+                    .arena
+                    .alloc_expr(Expr::Literal(Literal::String(s)), span))
             }
             Some(Token::True) => {
                 self.advance();
-                Ok(self.arena.alloc_expr(Expr::Literal(Literal::Bool(true))))
+                Ok(self
+                    .arena
+                    .alloc_expr(Expr::Literal(Literal::Bool(true)), span))
             }
             Some(Token::False) => {
                 self.advance();
-                Ok(self.arena.alloc_expr(Expr::Literal(Literal::Bool(false))))
+                Ok(self
+                    .arena
+                    .alloc_expr(Expr::Literal(Literal::Bool(false)), span))
             }
             Some(Token::Null) => {
                 self.advance();
-                Ok(self.arena.alloc_expr(Expr::Literal(Literal::Null)))
+                Ok(self.arena.alloc_expr(Expr::Literal(Literal::Null), span))
             }
             Some(Token::LParen) => {
                 self.advance();
@@ -819,12 +849,13 @@ impl<'a> Parser<'a> {
             Some(Token::Lt) if matches!(self.peek_ahead(1), Some(tok) if tok.as_ident().is_some()) =>
             {
                 let jsx = self.parse_jsx_element()?;
-                Ok(self.arena.alloc_expr(Expr::Jsx(Box::new(jsx))))
+                let jsx_span = jsx.span.clone();
+                Ok(self.arena.alloc_expr(Expr::Jsx(Box::new(jsx)), jsx_span))
             }
             Some(tok) if tok.as_ident().is_some() => {
                 let name = tok.as_ident().unwrap();
                 self.advance();
-                Ok(self.arena.alloc_expr(Expr::Ident(name)))
+                Ok(self.arena.alloc_expr(Expr::Ident(name), span))
             }
             Some(other) => Err(ParseError {
                 message: format!("Expected expression, found {:?}", other),
@@ -838,7 +869,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_object_literal(&mut self) -> Result<ExprId, ParseError> {
-        self.expect(Token::LBrace)?;
+        let lbrace_span = self.expect(Token::LBrace)?;
         let mut fields = Vec::new();
 
         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
@@ -859,12 +890,13 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect(Token::RBrace)?;
-        Ok(self.arena.alloc_expr(Expr::ObjectLit(fields)))
+        let rbrace_span = self.expect(Token::RBrace)?;
+        let span = lbrace_span.start..rbrace_span.end;
+        Ok(self.arena.alloc_expr(Expr::ObjectLit(fields), span))
     }
 
     fn parse_array_literal(&mut self) -> Result<ExprId, ParseError> {
-        self.expect(Token::LBracket)?;
+        let lbracket_span = self.expect(Token::LBracket)?;
         let mut items = Vec::new();
 
         while self.peek() != Some(&Token::RBracket) && self.peek().is_some() {
@@ -876,11 +908,12 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect(Token::RBracket)?;
-        Ok(self.arena.alloc_expr(Expr::ArrayLit(items)))
+        let rbracket_span = self.expect(Token::RBracket)?;
+        let span = lbracket_span.start..rbracket_span.end;
+        Ok(self.arena.alloc_expr(Expr::ArrayLit(items), span))
     }
 
-    fn parse_call_args(&mut self) -> Result<Vec<CallArg>, ParseError> {
+    fn parse_call_args(&mut self) -> Result<(Vec<CallArg>, Range<usize>), ParseError> {
         self.expect(Token::LParen)?;
         let mut args = Vec::new();
 
@@ -910,15 +943,15 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect(Token::RParen)?;
-        Ok(args)
+        let rparen_span = self.expect(Token::RParen)?;
+        Ok((args, rparen_span))
     }
 
     // -------------------------------------------------------------
     // JSX Element Parser
     // -------------------------------------------------------------
     fn parse_jsx_element(&mut self) -> Result<JsxElement, ParseError> {
-        self.expect(Token::Lt)?;
+        let start_span = self.expect(Token::Lt)?;
         let (tag, _) = self.expect_ident()?;
         let mut attrs = Vec::new();
 
@@ -981,11 +1014,13 @@ impl<'a> Parser<'a> {
 
         // Self-closing tag `<Tag ... />`
         if self.peek() == Some(&Token::SlashGt) {
+            let slash_gt_span = self.peek_span();
             self.advance();
             return Ok(JsxElement {
                 tag,
                 attrs,
                 children: Vec::new(),
+                span: start_span.start..slash_gt_span.end,
             });
         }
 
@@ -1051,12 +1086,13 @@ impl<'a> Parser<'a> {
                 span: self.peek_span(),
             });
         }
-        self.expect(Token::Gt)?;
+        let gt_span = self.expect(Token::Gt)?;
 
         Ok(JsxElement {
             tag,
             attrs,
             children,
+            span: start_span.start..gt_span.end,
         })
     }
 }
