@@ -187,7 +187,7 @@ pub enum Expr {
         code: i64,
         message: Option<ExprId>,
     },
-    Jsx(JsxElement),
+    Jsx(Box<JsxElement>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -201,6 +201,7 @@ pub enum Literal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
+    Assign,
     Add,
     Sub,
     Mul,

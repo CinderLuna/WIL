@@ -73,3 +73,16 @@ fn test_prefix_operator_precedence() {
         panic!("Expected Fn item");
     }
 }
+
+#[test]
+fn test_unquoted_jsx_and_assignment() {
+    let source = r#"
+    ui TestUi() {
+        let x = 10
+        x = 20
+        <button class="btn">Click me here</button>
+    }
+    "#;
+    let res = parse(source);
+    assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+}

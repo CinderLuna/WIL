@@ -337,6 +337,7 @@ impl<'a> Parser<'a> {
                     | Token::Minus
                     | Token::LBrace
                     | Token::RBrace
+                    | Token::Dot
             ) || tok.as_ident().is_some();
 
             if is_path_part {
@@ -693,6 +694,7 @@ impl<'a> Parser<'a> {
             }
 
             let op = match self.peek() {
+                Some(Token::Eq) => BinaryOp::Assign,
                 Some(Token::Plus) => BinaryOp::Add,
                 Some(Token::Minus) => BinaryOp::Sub,
                 Some(Token::Star) => BinaryOp::Mul,
@@ -817,7 +819,7 @@ impl<'a> Parser<'a> {
             Some(Token::Lt) if matches!(self.peek_ahead(1), Some(tok) if tok.as_ident().is_some()) =>
             {
                 let jsx = self.parse_jsx_element()?;
-                Ok(self.arena.alloc_expr(Expr::Jsx(jsx)))
+                Ok(self.arena.alloc_expr(Expr::Jsx(Box::new(jsx))))
             }
             Some(tok) if tok.as_ident().is_some() => {
                 let name = tok.as_ident().unwrap();
@@ -945,6 +947,7 @@ impl<'a> Parser<'a> {
                 None => break,
             };
 
+            let is_event = attr_name.starts_with('@') || attr_name.starts_with("on");
             let attr_val = if self.peek() == Some(&Token::Eq) {
                 self.advance();
                 match self.peek() {
@@ -954,24 +957,11 @@ impl<'a> Parser<'a> {
                         Some(JsxAttrValue::String(s))
                     }
                     Some(Token::LBrace) => {
-                        // Check if it's a block of statements or a single expression
-                        if let Some(tok) = self.peek_ahead(1) {
-                            if tok.as_ident().is_some()
-                                && matches!(
-                                    self.peek_ahead(2),
-                                    Some(Token::PlusEq | Token::MinusEq | Token::Eq)
-                                )
-                            {
-                                let block = self.parse_block()?;
-                                Some(JsxAttrValue::Block(block))
-                            } else {
-                                self.advance(); // consume LBrace
-                                let expr = self.parse_expr(0)?;
-                                self.expect(Token::RBrace)?;
-                                Some(JsxAttrValue::Expr(expr))
-                            }
+                        if is_event {
+                            let block = self.parse_block()?;
+                            Some(JsxAttrValue::Block(block))
                         } else {
-                            self.advance();
+                            self.advance(); // consume LBrace
                             let expr = self.parse_expr(0)?;
                             self.expect(Token::RBrace)?;
                             Some(JsxAttrValue::Expr(expr))
@@ -1024,6 +1014,22 @@ impl<'a> Parser<'a> {
                     self.advance();
                     children.push(JsxChild::Text(s));
                 }
+                Some(tok)
+                    if tok != &Token::Lt && tok != &Token::LBrace && tok != &Token::LtSlash =>
+                {
+                    let mut text = String::new();
+                    while let Some(t) = self.peek() {
+                        if t == &Token::Lt || t == &Token::LtSlash || t == &Token::LBrace {
+                            break;
+                        }
+                        let span = self.peek_span();
+                        text.push_str(&self.source[span]);
+                        self.advance();
+                    }
+                    if !text.trim().is_empty() {
+                        children.push(JsxChild::Text(text));
+                    }
+                }
                 Some(other) => {
                     return Err(ParseError {
                         message: format!("Unexpected token in JSX child: {:?}", other),
@@ -1057,7 +1063,7 @@ impl<'a> Parser<'a> {
 
 fn infix_binding_power(op: BinaryOp) -> (u8, u8) {
     match op {
-        BinaryOp::AddAssign | BinaryOp::SubAssign => (2, 1), // Right-associative
+        BinaryOp::Assign | BinaryOp::AddAssign | BinaryOp::SubAssign => (2, 1), // Right-associative
         BinaryOp::Coalesce => (3, 4),
         BinaryOp::Or => (5, 6),
         BinaryOp::And => (7, 8),

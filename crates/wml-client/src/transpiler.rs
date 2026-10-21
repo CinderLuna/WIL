@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use wml_syntax::ast::*;
 
 pub const EMBEDDED_SIGNALS_CORE: &str = r#"// WML Embedded Micro-Signals Core (< 2.5KB gzipped)
@@ -58,28 +59,40 @@ impl ClientTranspiler {
         ));
 
         let mut var_counter = 0;
+        let mut signals = HashSet::new();
 
+        // Pass 1: Collect signal declarations
+        for stmt in &ui.body.stmts {
+            if let Stmt::Let { name, val, .. } = stmt {
+                let expr = arena.get_expr(*val);
+                if let Expr::Call { callee, .. } = expr {
+                    if let Expr::Ident(callee_name) = arena.get_expr(*callee) {
+                        if callee_name == "signal" {
+                            signals.insert(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Transpile statements
         for stmt in &ui.body.stmts {
             match stmt {
                 Stmt::Let { name, val, .. } => {
                     let expr = arena.get_expr(*val);
-                    let mut is_signal = false;
-                    let mut signal_arg = None;
-
-                    if let Expr::Call { callee, args } = expr {
-                        if let Expr::Ident(callee_name) = arena.get_expr(*callee) {
-                            if callee_name == "signal" {
-                                is_signal = true;
-                                signal_arg = args.first();
-                            }
-                        }
-                    }
-
-                    if is_signal {
-                        let arg_code = if let Some(arg) = signal_arg {
-                            match arg {
-                                CallArg::Positional(e) => self.expr_to_js(*e, arena)?,
-                                CallArg::Named { val, .. } => self.expr_to_js(*val, arena)?,
+                    if signals.contains(name) {
+                        let arg_code = if let Expr::Call { args, .. } = expr {
+                            if let Some(arg) = args.first() {
+                                match arg {
+                                    CallArg::Positional(e) => {
+                                        self.expr_to_js(*e, arena, &signals)?
+                                    }
+                                    CallArg::Named { val, .. } => {
+                                        self.expr_to_js(*val, arena, &signals)?
+                                    }
+                                }
+                            } else {
+                                "undefined".to_string()
                             }
                         } else {
                             "undefined".to_string()
@@ -92,7 +105,7 @@ impl ClientTranspiler {
                         js.push_str(&format!(
                             "    let {} = {};\n",
                             name,
-                            self.expr_to_js(*val, arena)?
+                            self.expr_to_js(*val, arena, &signals)?
                         ));
                     }
                 }
@@ -124,17 +137,20 @@ impl ClientTranspiler {
                     let expr = arena.get_expr(*expr_id);
                     if let Expr::Jsx(jsx) = expr {
                         let (root_var, jsx_code) =
-                            self.transpile_jsx(jsx, arena, &mut var_counter)?;
+                            self.transpile_jsx(jsx, arena, &signals, &mut var_counter)?;
                         js.push_str(&jsx_code);
                         js.push_str(&format!("    container.appendChild({});\n", root_var));
                     } else {
-                        let code = self.expr_to_js(*expr_id, arena)?;
+                        let code = self.expr_to_js(*expr_id, arena, &signals)?;
                         js.push_str(&format!("    {};\n", code));
                     }
                 }
                 Stmt::Return(ret_expr) => {
                     if let Some(e) = ret_expr {
-                        js.push_str(&format!("    return {};\n", self.expr_to_js(*e, arena)?));
+                        js.push_str(&format!(
+                            "    return {};\n",
+                            self.expr_to_js(*e, arena, &signals)?
+                        ));
                     } else {
                         js.push_str("    return;\n");
                     }
@@ -151,6 +167,7 @@ impl ClientTranspiler {
         &self,
         elem: &JsxElement,
         arena: &AstArena,
+        signals: &HashSet<String>,
         var_gen: &mut usize,
     ) -> Result<(String, String), String> {
         let el_var = format!("_el{}", *var_gen);
@@ -183,12 +200,12 @@ impl ClientTranspiler {
                         for stmt in &block.stmts {
                             match stmt {
                                 Stmt::Expr(e) => {
-                                    let s = self.expr_to_js(*e, arena)?;
+                                    let s = self.expr_to_js(*e, arena, signals)?;
                                     code.push_str(&format!("        {};\n", s));
                                 }
                                 Stmt::Return(r) => {
                                     if let Some(e) = r {
-                                        let s = self.expr_to_js(*e, arena)?;
+                                        let s = self.expr_to_js(*e, arena, signals)?;
                                         code.push_str(&format!("        return {};\n", s));
                                     } else {
                                         code.push_str("        return;\n");
@@ -200,7 +217,7 @@ impl ClientTranspiler {
                         code.push_str("    });\n");
                     }
                     Some(JsxAttrValue::Expr(e)) => {
-                        let handler = self.expr_to_js(*e, arena)?;
+                        let handler = self.expr_to_js(*e, arena, signals)?;
                         code.push_str(&format!(
                             "    {}.addEventListener(\"{}\", {});\n",
                             el_var, event_name, handler
@@ -217,7 +234,7 @@ impl ClientTranspiler {
                         ));
                     }
                     Some(JsxAttrValue::Expr(e)) => {
-                        let val_expr = self.expr_to_js(*e, arena)?;
+                        let val_expr = self.expr_to_js(*e, arena, signals)?;
                         code.push_str(&format!(
                             "    effect(() => {{ {}.setAttribute(\"{}\", {}); }});\n",
                             el_var, attr.name, val_expr
@@ -244,14 +261,15 @@ impl ClientTranspiler {
                     ));
                 }
                 JsxChild::Element(child_elem) => {
-                    let (child_var, child_code) = self.transpile_jsx(child_elem, arena, var_gen)?;
+                    let (child_var, child_code) =
+                        self.transpile_jsx(child_elem, arena, signals, var_gen)?;
                     code.push_str(&child_code);
                     code.push_str(&format!("    {}.appendChild({});\n", el_var, child_var));
                 }
                 JsxChild::Expr(expr_id) => {
                     let node_var = format!("_t{}", *var_gen);
                     *var_gen += 1;
-                    let val_expr = self.expr_to_js(*expr_id, arena)?;
+                    let val_expr = self.expr_to_js(*expr_id, arena, signals)?;
                     code.push_str(&format!(
                         "    const {} = document.createTextNode(\"\");\n",
                         node_var
@@ -268,7 +286,12 @@ impl ClientTranspiler {
         Ok((el_var, code))
     }
 
-    pub fn expr_to_js(&self, id: ExprId, arena: &AstArena) -> Result<String, String> {
+    pub fn expr_to_js(
+        &self,
+        id: ExprId,
+        arena: &AstArena,
+        signals: &HashSet<String>,
+    ) -> Result<String, String> {
         let expr = arena.get_expr(id);
         match expr {
             Expr::Literal(Literal::Int(n)) => Ok(n.to_string()),
@@ -277,19 +300,23 @@ impl ClientTranspiler {
             Expr::Literal(Literal::Bool(b)) => Ok(b.to_string()),
             Expr::Literal(Literal::Null) => Ok("null".to_string()),
             Expr::Ident(s) => {
-                // In client reactive code, accessing signal value uses `.val` if it's a known identifier
-                Ok(s.clone())
+                if signals.contains(s) {
+                    Ok(format!("{}.val", s))
+                } else {
+                    Ok(s.clone())
+                }
             }
             Expr::Unary { op, expr } => {
                 let op_str = match op {
                     UnaryOp::Not => "!",
                     UnaryOp::Neg => "-",
                 };
-                let inner = self.expr_to_js(*expr, arena)?;
+                let inner = self.expr_to_js(*expr, arena, signals)?;
                 Ok(format!("({}{})", op_str, inner))
             }
             Expr::Binary { op, lhs, rhs } => {
                 let op_str = match op {
+                    BinaryOp::Assign => "=",
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
                     BinaryOp::Mul => "*",
@@ -307,28 +334,44 @@ impl ClientTranspiler {
                     BinaryOp::AddAssign => "+=",
                     BinaryOp::SubAssign => "-=",
                 };
-                let l = self.expr_to_js(*lhs, arena)?;
-                let r = self.expr_to_js(*rhs, arena)?;
+
+                // When assigning to a signal (e.g. count += 1 or count = 5), target `.val`
+                if matches!(
+                    op,
+                    BinaryOp::Assign | BinaryOp::AddAssign | BinaryOp::SubAssign
+                ) {
+                    if let Expr::Ident(name) = arena.get_expr(*lhs) {
+                        if signals.contains(name) {
+                            let r = self.expr_to_js(*rhs, arena, signals)?;
+                            return Ok(format!("({}.val {} {})", name, op_str, r));
+                        }
+                    }
+                }
+
+                let l = self.expr_to_js(*lhs, arena, signals)?;
+                let r = self.expr_to_js(*rhs, arena, signals)?;
                 Ok(format!("({} {} {})", l, op_str, r))
             }
             Expr::MemberAccess { object, field } => {
-                let obj = self.expr_to_js(*object, arena)?;
+                let obj = self.expr_to_js(*object, arena, signals)?;
                 Ok(format!("{}.{}", obj, field))
             }
             Expr::Call { callee, args } => {
-                let callee_js = self.expr_to_js(*callee, arena)?;
+                let callee_js = self.expr_to_js(*callee, arena, signals)?;
                 let args_js: Result<Vec<String>, String> = args
                     .iter()
                     .map(|a| match a {
-                        CallArg::Positional(e) => self.expr_to_js(*e, arena),
-                        CallArg::Named { val, .. } => self.expr_to_js(*val, arena),
+                        CallArg::Positional(e) => self.expr_to_js(*e, arena, signals),
+                        CallArg::Named { val, .. } => self.expr_to_js(*val, arena, signals),
                     })
                     .collect();
                 Ok(format!("{}({})", callee_js, args_js?.join(", ")))
             }
             Expr::ArrayLit(items) => {
-                let items_js: Result<Vec<String>, String> =
-                    items.iter().map(|e| self.expr_to_js(*e, arena)).collect();
+                let items_js: Result<Vec<String>, String> = items
+                    .iter()
+                    .map(|e| self.expr_to_js(*e, arena, signals))
+                    .collect();
                 Ok(format!("[{}]", items_js?.join(", ")))
             }
             Expr::ObjectLit(fields) => {
@@ -336,7 +379,7 @@ impl ClientTranspiler {
                     .iter()
                     .map(|f| match &f.val {
                         Some(v) => {
-                            let val_str = self.expr_to_js(*v, arena)?;
+                            let val_str = self.expr_to_js(*v, arena, signals)?;
                             Ok(format!("{}: {}", f.name, val_str))
                         }
                         None => Ok(f.name.clone()),

@@ -203,6 +203,7 @@ impl Token {
             Token::Unique => Some("unique".to_string()),
             Token::Indexed => Some("indexed".to_string()),
             Token::Auto => Some("auto".to_string()),
+            Token::RateLimit => Some("rate_limit".to_string()),
             _ => None,
         }
     }

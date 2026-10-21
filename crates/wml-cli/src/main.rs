@@ -72,7 +72,39 @@ fn main() -> anyhow::Result<()> {
             let source = match fs::read_to_string(&file) {
                 Ok(s) => s,
                 Err(err) => {
-                    eprintln!("Error reading file {}: {}", file.display(), err);
+                    if format == "ai-json" {
+                        let report = DiagnosticReport {
+                            protocol_version: "1.0.0".to_string(),
+                            status: DiagnosticStatus::Error,
+                            timestamp: current_timestamp,
+                            summary: DiagnosticSummary {
+                                total_errors: 1,
+                                total_warnings: 0,
+                                auto_fixable: 0,
+                            },
+                            diagnostics: vec![Diagnostic {
+                                id: "diag_io_001".to_string(),
+                                code: "WML-IO-1001".to_string(),
+                                category: "IoError".to_string(),
+                                severity: DiagnosticSeverity::Error,
+                                message: format!("Failed to read file {}: {}", file.display(), err),
+                                primary_location: Location {
+                                    file: file.display().to_string(),
+                                    span: Span {
+                                        start_line: 1,
+                                        start_col: 1,
+                                        end_line: 1,
+                                        end_col: 1,
+                                    },
+                                    byte_range: ByteRange { start: 0, end: 0 },
+                                },
+                                suggested_patch: None,
+                            }],
+                        };
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        eprintln!("Error reading file {}: {}", file.display(), err);
+                    }
                     std::process::exit(1);
                 }
             };

@@ -5,8 +5,9 @@ const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks aligned with ARM64/x86 pages
 
 pub struct RequestArena {
     current_ptr: UnsafeCell<*mut u8>,
-    end_ptr: UnsafeCell<*mut u8>,
+    end_ptr: *mut u8,
     base_ptr: *mut u8,
+    overflow_allocs: UnsafeCell<Vec<(*mut u8, Layout)>>,
 }
 
 impl Default for RequestArena {
@@ -25,19 +26,24 @@ impl RequestArena {
 
         Self {
             current_ptr: UnsafeCell::new(base_ptr),
-            end_ptr: UnsafeCell::new(end_ptr),
+            end_ptr,
             base_ptr,
+            overflow_allocs: UnsafeCell::new(Vec::new()),
         }
     }
 
     /// Fast bump allocation: ~2 CPU instructions without system malloc locks
     #[inline(always)]
     pub fn alloc(&self, size: usize, align: usize) -> *mut u8 {
+        debug_assert!(align.is_power_of_two());
         let current = unsafe { *self.current_ptr.get() };
         let aligned = (current as usize + (align - 1)) & !(align - 1);
-        let next = aligned + size;
+        let next = match aligned.checked_add(size) {
+            Some(n) => n,
+            None => return std::ptr::null_mut(),
+        };
 
-        if next <= unsafe { *self.end_ptr.get() } as usize {
+        if next <= self.end_ptr as usize {
             unsafe {
                 *self.current_ptr.get() = next as *mut u8;
             }
@@ -50,8 +56,16 @@ impl RequestArena {
 
     #[cold]
     fn alloc_overflow(&self, size: usize, align: usize) -> *mut u8 {
-        let layout = Layout::from_size_align(size, align).unwrap();
-        unsafe { alloc(layout) }
+        let layout = match Layout::from_size_align(size, align) {
+            Ok(l) => l,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let ptr = unsafe { alloc(layout) };
+        assert!(!ptr.is_null(), "Failed to allocate overflow block");
+        unsafe {
+            (*self.overflow_allocs.get()).push((ptr, layout));
+        }
+        ptr
     }
 
     /// Zero-cost teardown: O(1) pointer reset when HTTP response ends
@@ -59,12 +73,18 @@ impl RequestArena {
     pub fn reset(&self) {
         unsafe {
             *self.current_ptr.get() = self.base_ptr;
+            let overflows = &mut *self.overflow_allocs.get();
+            for &(ptr, layout) in overflows.iter() {
+                dealloc(ptr, layout);
+            }
+            overflows.clear();
         }
     }
 }
 
 impl Drop for RequestArena {
     fn drop(&mut self) {
+        self.reset();
         let layout = Layout::from_size_align(CHUNK_SIZE, 64).expect("Invalid layout");
         unsafe {
             dealloc(self.base_ptr, layout);
@@ -72,8 +92,11 @@ impl Drop for RequestArena {
     }
 }
 
+// RequestArena is !Send across thread boundaries per request-isolated thread-per-core invariant,
+// but can be transferred as Send between stages of a single worker.
+// It is explicitly NOT Sync because bump allocation uses UnsafeCell without cross-thread synchronization.
 unsafe impl Send for RequestArena {}
-unsafe impl Sync for RequestArena {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +116,21 @@ mod tests {
         arena.reset();
         let ptr3 = arena.alloc(128, 8);
         assert_eq!(ptr3, ptr1);
+    }
+
+    #[test]
+    fn test_arena_overflow_allocation_and_cleanup() {
+        let arena = RequestArena::new();
+
+        // Allocate a block larger than 64KB chunk
+        let large_size = 128 * 1024;
+        let large_ptr = arena.alloc(large_size, 64);
+        assert!(!large_ptr.is_null());
+
+        // Reset cleans up overflow blocks without leaking
+        arena.reset();
+
+        let ptr1 = arena.alloc(64, 8);
+        assert_eq!(ptr1, arena.base_ptr);
     }
 }

@@ -31,4 +31,7 @@ fn test_transpile_click_island() {
     assert!(js.contains("document.createElement(\"div\")"));
     assert!(js.contains("document.createElement(\"button\")"));
     assert!(js.contains("addEventListener(\"click\""));
+    // Verify signal access uses .val
+    assert!(js.contains("count.val += 1"));
+    assert!(js.contains(".textContent = count.val"));
 }

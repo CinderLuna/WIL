@@ -12,6 +12,7 @@ pub struct DiagnosticReport {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagnosticStatus {
+    #[serde(rename = "ok")]
     Success,
     Warning,
     Error,
