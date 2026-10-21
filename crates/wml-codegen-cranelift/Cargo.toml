@@ -7,5 +7,16 @@ license.workspace = true
 
 [dependencies]
 wml-mir = { path = "../wml-mir" }
+wml-runtime = { path = "../wml-runtime" }
 wml-diagnostics = { path = "../wml-diagnostics" }
+cranelift-codegen = "0.135"
+cranelift-jit = "0.135"
+cranelift-module = "0.135"
+cranelift-frontend = "0.135"
+cranelift-native = "0.135"
+target-lexicon = "0.13"
 thiserror = { workspace = true }
+
+[dev-dependencies]
+wml-syntax = { path = "../wml-syntax" }
+wml-hir = { path = "../wml-hir" }
