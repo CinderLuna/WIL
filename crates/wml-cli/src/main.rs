@@ -6,8 +6,10 @@ use wml_client::ClientTranspiler;
 use wml_codegen_cranelift::CraneliftJitBackend;
 use wml_codegen_llvm::{LlvmCompiler, TargetConfig, TargetOs};
 use wml_diagnostics::{
-    ByteRange, Diagnostic, DiagnosticCategory, DiagnosticReport, DiagnosticSeverity,
-    DiagnosticStatus, DiagnosticSummary, Location, Span,
+    apply_replacements_batch, byte_to_line_col, compute_context_slice, generate_diagnostic_id,
+    generate_unified_diff, ByteRange, CompilationMetrics, Diagnostic, DiagnosticCategory,
+    DiagnosticReport, DiagnosticSeverity, DiagnosticStatus, DiagnosticSummary, Location, PatchType,
+    Replacement, Span, SuggestedPatch,
 };
 use wml_hir::check;
 use wml_mir::{EscapeAnalysis, MirLowerer, MirOptimizer};
@@ -52,6 +54,26 @@ enum Commands {
         /// Output format (human or ai-json)
         #[arg(long, default_value = "human")]
         format: String,
+        /// Alias for --format=ai-json
+        #[arg(long)]
+        ai: bool,
+    },
+    /// Automatically fix diagnostic errors using suggested AI patches
+    Fix {
+        /// Path to the .wml file
+        file: PathBuf,
+        /// Minimum confidence threshold to apply patches (default: 0.8)
+        #[arg(long, default_value_t = 0.8)]
+        min_confidence: f64,
+        /// Show proposed patches and unified diffs without modifying file
+        #[arg(long)]
+        dry_run: bool,
+        /// Output format (human or ai-json)
+        #[arg(long, default_value = "human")]
+        format: String,
+        /// Alias for --format=ai-json
+        #[arg(long)]
+        ai: bool,
     },
     /// Start JIT dev server with instant live reload
     Dev {
@@ -86,50 +108,44 @@ enum Commands {
     },
 }
 
-fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
-    let mut line = 1;
-    let mut col = 1;
-    for (idx, ch) in source.char_indices() {
-        if idx >= byte_offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
-}
-
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let current_timestamp = chrono::Utc::now().to_rfc3339();
 
     match cli.command {
-        Commands::Check { file, format } => {
+        Commands::Check { file, format, ai } => {
+            let start_instant = std::time::Instant::now();
+            let is_ai = ai || format == "ai-json";
+            let file_str = file.display().to_string();
+
             let source = match fs::read_to_string(&file) {
                 Ok(s) => s,
                 Err(err) => {
-                    if format == "ai-json" {
+                    let duration_ms = (start_instant.elapsed().as_nanos() as f64) / 1_000_000.0;
+                    if is_ai {
                         let report = DiagnosticReport {
                             protocol_version: "1.0.0".to_string(),
                             status: DiagnosticStatus::Error,
-                            timestamp: current_timestamp,
-                            summary: DiagnosticSummary {
+                            timestamp: current_timestamp.clone(),
+                            summary: Some(DiagnosticSummary {
                                 total_errors: 1,
                                 total_warnings: 0,
                                 auto_fixable: 0,
-                            },
-                            diagnostics: vec![Diagnostic {
-                                id: "diag_io_001".to_string(),
-                                code: "WML-IO-1001".to_string(),
-                                category: DiagnosticCategory::RuntimePanic,
-                                severity: DiagnosticSeverity::Error,
-                                message: format!("Failed to read file {}: {}", file.display(), err),
-                                primary_location: Location {
-                                    file: file.display().to_string(),
+                            }),
+                            compilation_metrics: Some(CompilationMetrics {
+                                duration_ms,
+                                lines_parsed: 0,
+                                tokens_evaluated: 0,
+                                target: "check-only".to_string(),
+                            }),
+                            diagnostics: vec![Diagnostic::new(
+                                "diag_io_001".to_string(),
+                                "WML-IO-1001".to_string(),
+                                DiagnosticCategory::RuntimePanic,
+                                DiagnosticSeverity::Error,
+                                format!("Failed to read file {}: {}", file.display(), err),
+                                Location {
+                                    file: file_str.clone(),
                                     span: Span {
                                         start_line: 1,
                                         start_col: 1,
@@ -138,8 +154,7 @@ fn main() -> anyhow::Result<()> {
                                     },
                                     byte_range: ByteRange { start: 0, end: 0 },
                                 },
-                                suggested_patch: None,
-                            }],
+                            )],
                         };
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
@@ -149,10 +164,13 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
+            let lines_parsed = source.lines().count();
+            let tokens_evaluated = wml_syntax::tokenize(&source).map(|t| t.len()).unwrap_or(0);
+
             match parse(&source) {
                 Ok((program, arena)) => {
-                    let file_str = file.display().to_string();
                     let (_hir, diags) = wml_hir::check(&program, &arena, &source, &file_str);
+                    let duration_ms = (start_instant.elapsed().as_nanos() as f64) / 1_000_000.0;
 
                     let total_errors = diags
                         .iter()
@@ -164,7 +182,7 @@ fn main() -> anyhow::Result<()> {
                         .count();
                     let auto_fixable = diags.iter().filter(|d| d.suggested_patch.is_some()).count();
 
-                    if format == "ai-json" {
+                    if is_ai {
                         let status = if total_errors > 0 {
                             DiagnosticStatus::Error
                         } else if total_warnings > 0 {
@@ -176,12 +194,18 @@ fn main() -> anyhow::Result<()> {
                         let report = DiagnosticReport {
                             protocol_version: "1.0.0".to_string(),
                             status,
-                            timestamp: current_timestamp,
-                            summary: DiagnosticSummary {
+                            timestamp: current_timestamp.clone(),
+                            summary: Some(DiagnosticSummary {
                                 total_errors,
                                 total_warnings,
                                 auto_fixable,
-                            },
+                            }),
+                            compilation_metrics: Some(CompilationMetrics {
+                                duration_ms,
+                                lines_parsed,
+                                tokens_evaluated,
+                                target: "check-only".to_string(),
+                            }),
                             diagnostics: diags,
                         };
                         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -199,6 +223,19 @@ fn main() -> anyhow::Result<()> {
                                     d.primary_location.span.start_col,
                                     d.message
                                 );
+                                if let Some(slice) = &d.context_slice {
+                                    for line in &slice.lines {
+                                        let prefix = if line.is_focus == Some(true) {
+                                            ">"
+                                        } else {
+                                            " "
+                                        };
+                                        eprintln!(
+                                            "  {} {:4} | {}",
+                                            prefix, line.line_number, line.content
+                                        );
+                                    }
+                                }
                                 if let Some(patch) = &d.suggested_patch {
                                     eprintln!("  Suggested fix: {}", patch.explanation);
                                 }
@@ -214,41 +251,93 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 Err(parse_err) => {
+                    let duration_ms = (start_instant.elapsed().as_nanos() as f64) / 1_000_000.0;
                     let (start_line, start_col) = byte_to_line_col(&source, parse_err.span.start);
                     let (end_line, end_col) = byte_to_line_col(&source, parse_err.span.end);
+                    let byte_range = ByteRange {
+                        start: parse_err.span.start,
+                        end: parse_err.span.end,
+                    };
 
-                    let diagnostic = Diagnostic {
-                        id: format!("diag_{:x}", parse_err.span.start),
-                        code: "WML-SYN-1001".to_string(),
-                        category: DiagnosticCategory::SyntaxError,
-                        severity: DiagnosticSeverity::Error,
-                        message: parse_err.message.clone(),
-                        primary_location: Location {
-                            file: file.display().to_string(),
+                    let diag_id = generate_diagnostic_id(&file_str, &byte_range, "WML-SYN-1001");
+                    let context_slice = compute_context_slice(&source, start_line, 1);
+
+                    // Check for auto-fixable syntax errors
+                    let mut patch = None;
+                    if parse_err
+                        .message
+                        .starts_with("Mismatched JSX closing tag: expected `</")
+                    {
+                        if let Some(expected_tag) = parse_err
+                            .message
+                            .split("expected `</")
+                            .nth(1)
+                            .and_then(|s| s.split('>').next())
+                        {
+                            patch = Some(SuggestedPatch {
+                                patch_type: PatchType::AutoApply,
+                                confidence: 1.0,
+                                explanation: format!("Change closing tag to `</{}>`", expected_tag),
+                                replacement: Replacement {
+                                    file: file_str.clone(),
+                                    byte_range,
+                                    new_text: expected_tag.to_string(),
+                                },
+                                patch_unified: Some(generate_unified_diff(
+                                    &file_str,
+                                    &source,
+                                    &byte_range,
+                                    expected_tag,
+                                )),
+                            });
+                        }
+                    }
+
+                    let diagnostic = Diagnostic::new(
+                        diag_id,
+                        "WML-SYN-1001".to_string(),
+                        DiagnosticCategory::SyntaxError,
+                        DiagnosticSeverity::Error,
+                        parse_err.message.clone(),
+                        Location {
+                            file: file_str.clone(),
                             span: Span {
                                 start_line,
                                 start_col,
                                 end_line,
                                 end_col,
                             },
-                            byte_range: ByteRange {
-                                start: parse_err.span.start,
-                                end: parse_err.span.end,
-                            },
+                            byte_range,
                         },
-                        suggested_patch: None,
+                    )
+                    .with_context_slice(context_slice);
+
+                    let diagnostic = if let Some(p) = patch {
+                        diagnostic.with_patch(p)
+                    } else {
+                        diagnostic
                     };
 
-                    if format == "ai-json" {
+                    if is_ai {
                         let report = DiagnosticReport {
                             protocol_version: "1.0.0".to_string(),
                             status: DiagnosticStatus::Error,
-                            timestamp: current_timestamp,
-                            summary: DiagnosticSummary {
+                            timestamp: current_timestamp.clone(),
+                            summary: Some(DiagnosticSummary {
                                 total_errors: 1,
                                 total_warnings: 0,
-                                auto_fixable: 0,
-                            },
+                                auto_fixable: if diagnostic.suggested_patch.is_some() {
+                                    1
+                                } else {
+                                    0
+                                },
+                            }),
+                            compilation_metrics: Some(CompilationMetrics {
+                                duration_ms,
+                                lines_parsed,
+                                tokens_evaluated,
+                                target: "check-only".to_string(),
+                            }),
                             diagnostics: vec![diagnostic],
                         };
                         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -265,6 +354,272 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Fix {
+            file,
+            min_confidence,
+            dry_run,
+            format,
+            ai,
+        } => {
+            let is_ai = ai || format == "ai-json";
+            let file_str = file.display().to_string();
+            let mut current_source = match fs::read_to_string(&file) {
+                Ok(s) => s,
+                Err(err) => {
+                    if is_ai {
+                        let report = serde_json::json!({
+                            "protocol_version": "1.0.0",
+                            "status": "error",
+                            "error": format!("Failed to read file {}: {}", file.display(), err),
+                            "timestamp": current_timestamp.clone(),
+                        });
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        eprintln!("Error reading file {}: {}", file.display(), err);
+                    }
+                    std::process::exit(1);
+                }
+            };
+
+            let mut all_applied_patches: Vec<serde_json::Value> = Vec::new();
+            let mut iteration = 0;
+            let max_iterations = 5;
+
+            loop {
+                iteration += 1;
+                if iteration > max_iterations {
+                    break;
+                }
+
+                // Parse and check current source
+                let diags = match parse(&current_source) {
+                    Ok((program, arena)) => {
+                        let (_hir, d) =
+                            wml_hir::check(&program, &arena, &current_source, &file_str);
+                        d
+                    }
+                    Err(parse_err) => {
+                        let (start_line, start_col) =
+                            byte_to_line_col(&current_source, parse_err.span.start);
+                        let (end_line, end_col) =
+                            byte_to_line_col(&current_source, parse_err.span.end);
+                        let byte_range = ByteRange {
+                            start: parse_err.span.start,
+                            end: parse_err.span.end,
+                        };
+                        let diag_id =
+                            generate_diagnostic_id(&file_str, &byte_range, "WML-SYN-1001");
+                        let context_slice = compute_context_slice(&current_source, start_line, 1);
+
+                        let mut patch = None;
+                        if parse_err
+                            .message
+                            .starts_with("Mismatched JSX closing tag: expected `</")
+                        {
+                            if let Some(expected_tag) = parse_err
+                                .message
+                                .split("expected `</")
+                                .nth(1)
+                                .and_then(|s| s.split('>').next())
+                            {
+                                patch = Some(SuggestedPatch {
+                                    patch_type: PatchType::AutoApply,
+                                    confidence: 1.0,
+                                    explanation: format!(
+                                        "Change closing tag to `</{}>`",
+                                        expected_tag
+                                    ),
+                                    replacement: Replacement {
+                                        file: file_str.clone(),
+                                        byte_range,
+                                        new_text: expected_tag.to_string(),
+                                    },
+                                    patch_unified: Some(generate_unified_diff(
+                                        &file_str,
+                                        &current_source,
+                                        &byte_range,
+                                        expected_tag,
+                                    )),
+                                });
+                            }
+                        }
+
+                        let diag = Diagnostic::new(
+                            diag_id,
+                            "WML-SYN-1001".to_string(),
+                            DiagnosticCategory::SyntaxError,
+                            DiagnosticSeverity::Error,
+                            parse_err.message,
+                            Location {
+                                file: file_str.clone(),
+                                span: Span {
+                                    start_line,
+                                    start_col,
+                                    end_line,
+                                    end_col,
+                                },
+                                byte_range,
+                            },
+                        )
+                        .with_context_slice(context_slice);
+
+                        let diag = if let Some(p) = patch {
+                            diag.with_patch(p)
+                        } else {
+                            diag
+                        };
+
+                        vec![diag]
+                    }
+                };
+
+                // Find candidate patches
+                let candidate_patches: Vec<SuggestedPatch> = diags
+                    .into_iter()
+                    .filter_map(|d| d.suggested_patch)
+                    .filter(|p| {
+                        p.patch_type == PatchType::AutoApply && p.confidence >= min_confidence
+                    })
+                    .collect();
+
+                if candidate_patches.is_empty() {
+                    break;
+                }
+
+                // If dry_run, just record proposed patches and stop
+                if dry_run {
+                    for p in &candidate_patches {
+                        all_applied_patches.push(serde_json::json!({
+                            "patch_type": "AUTO_APPLY",
+                            "confidence": p.confidence,
+                            "explanation": p.explanation,
+                            "replacement": {
+                                "byte_range": p.replacement.byte_range,
+                                "new_text": p.replacement.new_text,
+                            },
+                            "patch_unified": p.patch_unified,
+                        }));
+                    }
+                    break;
+                }
+
+                // Collect replacements and apply batch
+                let replacements: Vec<Replacement> = candidate_patches
+                    .iter()
+                    .map(|p| p.replacement.clone())
+                    .collect();
+                match apply_replacements_batch(&current_source, &replacements) {
+                    Ok(new_source) => {
+                        for p in &candidate_patches {
+                            all_applied_patches.push(serde_json::json!({
+                                "patch_type": "AUTO_APPLY",
+                                "confidence": p.confidence,
+                                "explanation": p.explanation,
+                                "replacement": {
+                                    "byte_range": p.replacement.byte_range,
+                                    "new_text": p.replacement.new_text,
+                                },
+                                "patch_unified": p.patch_unified,
+                            }));
+                        }
+                        current_source = new_source;
+                    }
+                    Err(err) => {
+                        if is_ai {
+                            let report = serde_json::json!({
+                                "protocol_version": "1.0.0",
+                                "status": "error",
+                                "error": format!("Failed to apply patch batch: {}", err),
+                                "timestamp": current_timestamp.clone(),
+                            });
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        } else {
+                            eprintln!("Error applying patches: {}", err);
+                        }
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            // If not dry_run and patches were applied, write to disk
+            if !dry_run && !all_applied_patches.is_empty() {
+                if let Err(e) = fs::write(&file, &current_source) {
+                    eprintln!(
+                        "Failed to write updated source to {}: {}",
+                        file.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            }
+
+            // Final re-check to determine remaining errors
+            let final_errors = match parse(&current_source) {
+                Ok((prog, ar)) => {
+                    let (_, d) = wml_hir::check(&prog, &ar, &current_source, &file_str);
+                    d.iter()
+                        .filter(|x| x.severity == DiagnosticSeverity::Error)
+                        .count()
+                }
+                Err(_) => 1,
+            };
+
+            if is_ai {
+                let report = serde_json::json!({
+                    "protocol_version": "1.0.0",
+                    "status": if final_errors == 0 { "ok" } else { "error" },
+                    "file": file_str,
+                    "dry_run": dry_run,
+                    "total_applied": all_applied_patches.len(),
+                    "remaining_errors": final_errors,
+                    "applied_patches": all_applied_patches,
+                    "timestamp": current_timestamp.clone(),
+                });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                if dry_run {
+                    println!(
+                        "Dry-run mode: {} auto-fixable patch(es) found for {}:",
+                        all_applied_patches.len(),
+                        file.display()
+                    );
+                    for (i, p) in all_applied_patches.iter().enumerate() {
+                        let exp = p["explanation"].as_str().unwrap_or("");
+                        let conf = p["confidence"].as_f64().unwrap_or(0.0) * 100.0;
+                        println!("  {}. {} (confidence: {:.0}%)", i + 1, exp, conf);
+                        if let Some(diff) = p["patch_unified"].as_str() {
+                            println!("\n{}\n", diff);
+                        }
+                    }
+                } else if all_applied_patches.is_empty() {
+                    println!(
+                        "No auto-fixable patches available for {} (remaining errors: {}).",
+                        file.display(),
+                        final_errors
+                    );
+                } else {
+                    println!(
+                        "Applied {} fix(es) to {}:",
+                        all_applied_patches.len(),
+                        file.display()
+                    );
+                    for (i, p) in all_applied_patches.iter().enumerate() {
+                        let exp = p["explanation"].as_str().unwrap_or("");
+                        let conf = p["confidence"].as_f64().unwrap_or(0.0) * 100.0;
+                        println!("  {}. {} (confidence: {:.0}%)", i + 1, exp, conf);
+                    }
+                    if final_errors == 0 {
+                        println!("Re-checking {}... OK (0 errors remaining)", file.display());
+                    } else {
+                        println!(
+                            "Re-checking {}... {} error(s) remaining",
+                            file.display(),
+                            final_errors
+                        );
+                    }
+                }
+            }
+        }
         Commands::Dev {
             file,
             port,
@@ -278,13 +633,13 @@ fn main() -> anyhow::Result<()> {
                 Ok(s) => s,
                 Err(e) => {
                     if format == "ai-json" {
-                        let diagnostic = Diagnostic {
-                            id: "diag_io_001".to_string(),
-                            code: "WML-IO-1001".to_string(),
-                            category: DiagnosticCategory::SyntaxError,
-                            severity: DiagnosticSeverity::Error,
-                            message: format!("Failed to read file '{}': {}", file_str, e),
-                            primary_location: Location {
+                        let diagnostic = Diagnostic::new(
+                            "diag_io_001".to_string(),
+                            "WML-IO-1001".to_string(),
+                            DiagnosticCategory::SyntaxError,
+                            DiagnosticSeverity::Error,
+                            format!("Failed to read file '{}': {}", file_str, e),
+                            Location {
                                 file: file_str.clone(),
                                 span: Span {
                                     start_line: 1,
@@ -294,19 +649,12 @@ fn main() -> anyhow::Result<()> {
                                 },
                                 byte_range: ByteRange { start: 0, end: 0 },
                             },
-                            suggested_patch: None,
-                        };
-                        let report = DiagnosticReport {
-                            protocol_version: "1.0.0".to_string(),
-                            status: DiagnosticStatus::Error,
-                            timestamp: current_timestamp,
-                            summary: DiagnosticSummary {
-                                total_errors: 1,
-                                total_warnings: 0,
-                                auto_fixable: 0,
-                            },
-                            diagnostics: vec![diagnostic],
-                        };
+                        );
+                        let report = DiagnosticReport::new(
+                            DiagnosticStatus::Error,
+                            current_timestamp.clone(),
+                            vec![diagnostic],
+                        );
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
                         eprintln!("Error reading file {}: {}", file_str, e);
@@ -322,13 +670,13 @@ fn main() -> anyhow::Result<()> {
                     let (start_line, start_col) = byte_to_line_col(&source, parse_err.span.start);
                     let (end_line, end_col) = byte_to_line_col(&source, parse_err.span.end);
 
-                    let diagnostic = Diagnostic {
-                        id: format!("diag_{:x}", parse_err.span.start),
-                        code: "WML-SYN-1001".to_string(),
-                        category: DiagnosticCategory::SyntaxError,
-                        severity: DiagnosticSeverity::Error,
-                        message: parse_err.message.clone(),
-                        primary_location: Location {
+                    let diagnostic = Diagnostic::new(
+                        format!("diag_{:x}", parse_err.span.start),
+                        "WML-SYN-1001".to_string(),
+                        DiagnosticCategory::SyntaxError,
+                        DiagnosticSeverity::Error,
+                        parse_err.message.clone(),
+                        Location {
                             file: file_str.clone(),
                             span: Span {
                                 start_line,
@@ -341,21 +689,14 @@ fn main() -> anyhow::Result<()> {
                                 end: parse_err.span.end,
                             },
                         },
-                        suggested_patch: None,
-                    };
+                    );
 
                     if format == "ai-json" {
-                        let report = DiagnosticReport {
-                            protocol_version: "1.0.0".to_string(),
-                            status: DiagnosticStatus::Error,
-                            timestamp: current_timestamp,
-                            summary: DiagnosticSummary {
-                                total_errors: 1,
-                                total_warnings: 0,
-                                auto_fixable: 0,
-                            },
-                            diagnostics: vec![diagnostic],
-                        };
+                        let report = DiagnosticReport::new(
+                            DiagnosticStatus::Error,
+                            current_timestamp.clone(),
+                            vec![diagnostic],
+                        );
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
                         eprintln!(
@@ -374,17 +715,11 @@ fn main() -> anyhow::Result<()> {
                 .any(|d| d.severity == DiagnosticSeverity::Error);
             if has_errors {
                 if format == "ai-json" {
-                    let report = DiagnosticReport {
-                        protocol_version: "1.0.0".to_string(),
-                        status: DiagnosticStatus::Error,
-                        timestamp: current_timestamp,
-                        summary: DiagnosticSummary {
-                            total_errors: diags.len(),
-                            total_warnings: 0,
-                            auto_fixable: 0,
-                        },
-                        diagnostics: diags,
-                    };
+                    let report = DiagnosticReport::new(
+                        DiagnosticStatus::Error,
+                        current_timestamp.clone(),
+                        diags,
+                    );
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     for d in &diags {
@@ -492,13 +827,13 @@ fn main() -> anyhow::Result<()> {
                 Ok(s) => s,
                 Err(e) => {
                     if format == "ai-json" {
-                        let diagnostic = Diagnostic {
-                            id: "diag_io_001".to_string(),
-                            code: "WML-IO-1001".to_string(),
-                            category: DiagnosticCategory::SyntaxError,
-                            severity: DiagnosticSeverity::Error,
-                            message: format!("Failed to read file '{}': {}", file_str, e),
-                            primary_location: Location {
+                        let diagnostic = Diagnostic::new(
+                            "diag_io_001".to_string(),
+                            "WML-IO-1001".to_string(),
+                            DiagnosticCategory::SyntaxError,
+                            DiagnosticSeverity::Error,
+                            format!("Failed to read file '{}': {}", file_str, e),
+                            Location {
                                 file: file_str.clone(),
                                 span: Span {
                                     start_line: 1,
@@ -508,19 +843,12 @@ fn main() -> anyhow::Result<()> {
                                 },
                                 byte_range: ByteRange { start: 0, end: 0 },
                             },
-                            suggested_patch: None,
-                        };
-                        let report = DiagnosticReport {
-                            protocol_version: "1.0.0".to_string(),
-                            status: DiagnosticStatus::Error,
-                            timestamp: current_timestamp.clone(),
-                            summary: DiagnosticSummary {
-                                total_errors: 1,
-                                total_warnings: 0,
-                                auto_fixable: 0,
-                            },
-                            diagnostics: vec![diagnostic],
-                        };
+                        );
+                        let report = DiagnosticReport::new(
+                            DiagnosticStatus::Error,
+                            current_timestamp.clone(),
+                            vec![diagnostic],
+                        );
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
                         eprintln!("Error reading file {}: {}", file_str, e);
@@ -536,13 +864,13 @@ fn main() -> anyhow::Result<()> {
                     let (start_line, start_col) = byte_to_line_col(&source, parse_err.span.start);
                     let (end_line, end_col) = byte_to_line_col(&source, parse_err.span.end);
 
-                    let diagnostic = Diagnostic {
-                        id: format!("diag_{:x}", parse_err.span.start),
-                        code: "WML-SYN-1001".to_string(),
-                        category: DiagnosticCategory::SyntaxError,
-                        severity: DiagnosticSeverity::Error,
-                        message: parse_err.message.clone(),
-                        primary_location: Location {
+                    let diagnostic = Diagnostic::new(
+                        format!("diag_{:x}", parse_err.span.start),
+                        "WML-SYN-1001".to_string(),
+                        DiagnosticCategory::SyntaxError,
+                        DiagnosticSeverity::Error,
+                        parse_err.message.clone(),
+                        Location {
                             file: file_str.clone(),
                             span: Span {
                                 start_line,
@@ -555,21 +883,14 @@ fn main() -> anyhow::Result<()> {
                                 end: parse_err.span.end,
                             },
                         },
-                        suggested_patch: None,
-                    };
+                    );
 
                     if format == "ai-json" {
-                        let report = DiagnosticReport {
-                            protocol_version: "1.0.0".to_string(),
-                            status: DiagnosticStatus::Error,
-                            timestamp: current_timestamp.clone(),
-                            summary: DiagnosticSummary {
-                                total_errors: 1,
-                                total_warnings: 0,
-                                auto_fixable: 0,
-                            },
-                            diagnostics: vec![diagnostic],
-                        };
+                        let report = DiagnosticReport::new(
+                            DiagnosticStatus::Error,
+                            current_timestamp.clone(),
+                            vec![diagnostic],
+                        );
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
                         eprintln!(
@@ -588,17 +909,11 @@ fn main() -> anyhow::Result<()> {
                 .any(|d| d.severity == DiagnosticSeverity::Error);
             if has_errors {
                 if format == "ai-json" {
-                    let report = DiagnosticReport {
-                        protocol_version: "1.0.0".to_string(),
-                        status: DiagnosticStatus::Error,
-                        timestamp: current_timestamp.clone(),
-                        summary: DiagnosticSummary {
-                            total_errors: diags.len(),
-                            total_warnings: 0,
-                            auto_fixable: 0,
-                        },
-                        diagnostics: diags,
-                    };
+                    let report = DiagnosticReport::new(
+                        DiagnosticStatus::Error,
+                        current_timestamp.clone(),
+                        diags,
+                    );
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     for d in &diags {

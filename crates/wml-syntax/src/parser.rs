@@ -1076,14 +1076,14 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(Token::LtSlash)?;
-        let (closing_tag, _) = self.expect_ident()?;
+        let (closing_tag, closing_span) = self.expect_ident()?;
         if closing_tag != tag {
             return Err(ParseError {
                 message: format!(
                     "Mismatched JSX closing tag: expected `</{}>`, found `</{}>`",
                     tag, closing_tag
                 ),
-                span: self.peek_span(),
+                span: closing_span,
             });
         }
         let gt_span = self.expect(Token::Gt)?;
