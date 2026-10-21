@@ -65,25 +65,79 @@ impl EscapeAnalysis {
             }
         }
 
-        // Pass 2: Forward propagation of escaping set across copies/slices
+        // Pass 2: Bidirectional propagation across copies, slices, and block arguments
+        let block_map: std::collections::HashMap<BlockId, &BasicBlock> =
+            func.blocks.iter().map(|b| (b.id, b)).collect();
+
         let mut changed = true;
         while changed {
             changed = false;
             for bb in &func.blocks {
                 for (dest, inst, _) in &bb.instructions {
                     match inst {
-                        MirInst::Copy(src)
-                            if escaping_values.contains(src) && escaping_values.insert(*dest) =>
-                        {
-                            changed = true;
+                        MirInst::Copy(src) => {
+                            if escaping_values.contains(src) && escaping_values.insert(*dest) {
+                                changed = true;
+                            }
+                            if escaping_values.contains(dest) && escaping_values.insert(*src) {
+                                changed = true;
+                            }
                         }
-                        MirInst::MakeSlice { ptr, .. }
-                            if escaping_values.contains(ptr) && escaping_values.insert(*dest) =>
-                        {
-                            changed = true;
+                        MirInst::MakeSlice { ptr, .. } => {
+                            if escaping_values.contains(ptr) && escaping_values.insert(*dest) {
+                                changed = true;
+                            }
+                            if escaping_values.contains(dest) && escaping_values.insert(*ptr) {
+                                changed = true;
+                            }
+                        }
+                        MirInst::SlicePtr(slice) => {
+                            if escaping_values.contains(slice) && escaping_values.insert(*dest) {
+                                changed = true;
+                            }
+                            if escaping_values.contains(dest) && escaping_values.insert(*slice) {
+                                changed = true;
+                            }
                         }
                         _ => {}
                     }
+                }
+
+                // Propagate across block arguments on branch/jump boundaries
+                let mut check_jump_args = |target_id: BlockId, args: &[ValueId]| {
+                    if let Some(target_bb) = block_map.get(&target_id) {
+                        for (i, (param_val, _)) in target_bb.params.iter().enumerate() {
+                            if let Some(&arg_val) = args.get(i) {
+                                if escaping_values.contains(param_val)
+                                    && escaping_values.insert(arg_val)
+                                {
+                                    changed = true;
+                                }
+                                if escaping_values.contains(&arg_val)
+                                    && escaping_values.insert(*param_val)
+                                {
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                };
+
+                match &bb.terminator {
+                    MirTerminator::Jump { target, args } => {
+                        check_jump_args(*target, args);
+                    }
+                    MirTerminator::Branch {
+                        then_block,
+                        then_args,
+                        else_block,
+                        else_args,
+                        ..
+                    } => {
+                        check_jump_args(*then_block, then_args);
+                        check_jump_args(*else_block, else_args);
+                    }
+                    _ => {}
                 }
             }
         }

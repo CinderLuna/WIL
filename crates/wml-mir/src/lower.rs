@@ -332,10 +332,12 @@ impl MirLowerer {
                 if in_route {
                     if let Some(rv) = ret_val {
                         if let Some(res) = self.res_ptr {
+                            let ptr = self.emit_inst(MirInst::SlicePtr(rv), MirType::Ptr);
+                            let len = self.emit_inst(MirInst::SliceLen(rv), MirType::I64);
                             self.emit_inst(
                                 MirInst::CallRuntime {
                                     intrinsic: "wml_res_set_body".to_string(),
-                                    args: vec![res, rv],
+                                    args: vec![res, ptr, len],
                                 },
                                 MirType::Unit,
                             );

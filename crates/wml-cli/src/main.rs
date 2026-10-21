@@ -242,14 +242,97 @@ fn main() -> anyhow::Result<()> {
             dry_run,
         } => {
             let start_time = std::time::Instant::now();
-            let source = fs::read_to_string(&file)?;
             let file_str = file.display().to_string();
+
+            let source = match fs::read_to_string(&file) {
+                Ok(s) => s,
+                Err(e) => {
+                    if format == "ai-json" {
+                        let diagnostic = Diagnostic {
+                            id: "diag_io_001".to_string(),
+                            code: "WML-IO-1001".to_string(),
+                            category: DiagnosticCategory::SyntaxError,
+                            severity: DiagnosticSeverity::Error,
+                            message: format!("Failed to read file '{}': {}", file_str, e),
+                            primary_location: Location {
+                                file: file_str.clone(),
+                                span: Span {
+                                    start_line: 1,
+                                    start_col: 1,
+                                    end_line: 1,
+                                    end_col: 1,
+                                },
+                                byte_range: ByteRange { start: 0, end: 0 },
+                            },
+                            suggested_patch: None,
+                        };
+                        let report = DiagnosticReport {
+                            protocol_version: "1.0.0".to_string(),
+                            status: DiagnosticStatus::Error,
+                            timestamp: current_timestamp,
+                            summary: DiagnosticSummary {
+                                total_errors: 1,
+                                total_warnings: 0,
+                                auto_fixable: 0,
+                            },
+                            diagnostics: vec![diagnostic],
+                        };
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        eprintln!("Error reading file {}: {}", file_str, e);
+                    }
+                    std::process::exit(1);
+                }
+            };
 
             // 1. Parse
             let (program, arena) = match parse(&source) {
                 Ok(res) => res,
                 Err(parse_err) => {
-                    eprintln!("Parse error in {}: {}", file_str, parse_err.message);
+                    let (start_line, start_col) = byte_to_line_col(&source, parse_err.span.start);
+                    let (end_line, end_col) = byte_to_line_col(&source, parse_err.span.end);
+
+                    let diagnostic = Diagnostic {
+                        id: format!("diag_{:x}", parse_err.span.start),
+                        code: "WML-SYN-1001".to_string(),
+                        category: DiagnosticCategory::SyntaxError,
+                        severity: DiagnosticSeverity::Error,
+                        message: parse_err.message.clone(),
+                        primary_location: Location {
+                            file: file_str.clone(),
+                            span: Span {
+                                start_line,
+                                start_col,
+                                end_line,
+                                end_col,
+                            },
+                            byte_range: ByteRange {
+                                start: parse_err.span.start,
+                                end: parse_err.span.end,
+                            },
+                        },
+                        suggested_patch: None,
+                    };
+
+                    if format == "ai-json" {
+                        let report = DiagnosticReport {
+                            protocol_version: "1.0.0".to_string(),
+                            status: DiagnosticStatus::Error,
+                            timestamp: current_timestamp,
+                            summary: DiagnosticSummary {
+                                total_errors: 1,
+                                total_warnings: 0,
+                                auto_fixable: 0,
+                            },
+                            diagnostics: vec![diagnostic],
+                        };
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        eprintln!(
+                            "Error in {}:{}:{}: {}",
+                            file_str, start_line, start_col, parse_err.message
+                        );
+                    }
                     std::process::exit(1);
                 }
             };
