@@ -5,13 +5,21 @@ use crate::types::Type;
 use std::collections::HashMap;
 use std::ops::Range;
 use wml_diagnostics::{
+    byte_to_line_col, compute_context_slice, generate_diagnostic_id, generate_unified_diff,
     ByteRange, Diagnostic, DiagnosticCategory, DiagnosticSeverity, Location, PatchType,
-    Replacement, Span, SuggestedPatch,
+    RelatedLocation, Replacement, Span, SuggestedPatch, TypeInfo,
 };
 use wml_syntax::ast::{
     AstArena, Block, CallArg, ElseBranch, Expr, ExprId, Item, JsxAttrValue, JsxChild, Literal,
     ObjectField, Program, Stmt,
 };
+
+#[derive(Default)]
+pub struct DiagMeta {
+    pub related_locations: Vec<RelatedLocation>,
+    pub type_info: Option<TypeInfo>,
+    pub patch: Option<SuggestedPatch>,
+}
 
 pub struct TypeChecker<'a> {
     source: &'a str,
@@ -19,7 +27,6 @@ pub struct TypeChecker<'a> {
     arena: &'a AstArena,
     diagnostics: Vec<Diagnostic>,
     models: HashMap<String, ModelDef>,
-    diag_counter: usize,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -30,13 +37,7 @@ impl<'a> TypeChecker<'a> {
             arena,
             diagnostics: Vec::new(),
             models: HashMap::new(),
-            diag_counter: 0,
         }
-    }
-
-    fn next_diag_id(&mut self) -> String {
-        self.diag_counter += 1;
-        format!("diag_hir_{:04x}", self.diag_counter)
     }
 
     fn emit_diag(
@@ -47,15 +48,55 @@ impl<'a> TypeChecker<'a> {
         span: Range<usize>,
         patch: Option<SuggestedPatch>,
     ) {
-        let id = self.next_diag_id();
+        self.emit_diagnostic(
+            code,
+            category,
+            DiagnosticSeverity::Error,
+            message,
+            span,
+            DiagMeta {
+                related_locations: Vec::new(),
+                type_info: None,
+                patch,
+            },
+        );
+    }
+
+    fn emit_diagnostic(
+        &mut self,
+        code: &str,
+        category: DiagnosticCategory,
+        severity: DiagnosticSeverity,
+        message: &str,
+        span: Range<usize>,
+        mut meta: DiagMeta,
+    ) {
         let (start_line, start_col) = byte_to_line_col(self.source, span.start);
         let (end_line, end_col) = byte_to_line_col(self.source, span.end);
+
+        let byte_range = ByteRange {
+            start: span.start,
+            end: span.end,
+        };
+        let id = generate_diagnostic_id(self.file, &byte_range, code);
+        let context_slice = compute_context_slice(self.source, start_line, 1);
+
+        if let Some(p) = &mut meta.patch {
+            if p.patch_unified.is_none() {
+                p.patch_unified = Some(generate_unified_diff(
+                    self.file,
+                    self.source,
+                    &p.replacement.byte_range,
+                    &p.replacement.new_text,
+                ));
+            }
+        }
 
         self.diagnostics.push(Diagnostic {
             id,
             code: code.to_string(),
             category,
-            severity: DiagnosticSeverity::Error,
+            severity,
             message: message.to_string(),
             primary_location: Location {
                 file: self.file.to_string(),
@@ -65,12 +106,12 @@ impl<'a> TypeChecker<'a> {
                     end_line,
                     end_col,
                 },
-                byte_range: ByteRange {
-                    start: span.start,
-                    end: span.end,
-                },
+                byte_range,
             },
-            suggested_patch: patch,
+            related_locations: meta.related_locations,
+            type_info: meta.type_info,
+            context_slice: Some(context_slice),
+            suggested_patch: meta.patch,
         });
     }
 
@@ -941,15 +982,68 @@ impl<'a> TypeChecker<'a> {
                                         expected,
                                         found,
                                     } => {
-                                        self.emit_diag(
+                                        let mut field_span = span.clone();
+                                        for arg in &args {
+                                            let expr_id = match arg {
+                                                CallArg::Positional(id) => *id,
+                                                CallArg::Named { val, .. } => *val,
+                                            };
+                                            if let Expr::ObjectLit(fields) =
+                                                self.arena.get_expr(expr_id)
+                                            {
+                                                for f in fields {
+                                                    if f.name == f_name {
+                                                        if let Some(val_id) = f.val {
+                                                            field_span =
+                                                                self.arena.get_span(val_id);
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        let mut patch = None;
+                                        if let Some(sym) = scope.lookup(&f_name) {
+                                            if sym.ty == expected {
+                                                patch = Some(SuggestedPatch {
+                                                    patch_type: PatchType::AutoApply,
+                                                    confidence: 0.98,
+                                                    explanation: format!(
+                                                        "Replace literal with variable `{}` passed in scope.",
+                                                        f_name
+                                                    ),
+                                                    replacement: Replacement {
+                                                        file: self.file.to_string(),
+                                                        byte_range: ByteRange {
+                                                            start: field_span.start,
+                                                            end: field_span.end,
+                                                        },
+                                                        new_text: f_name.clone(),
+                                                    },
+                                                    patch_unified: None,
+                                                });
+                                            }
+                                        }
+
+                                        self.emit_diagnostic(
                                             "WML-TYP-2041",
                                             DiagnosticCategory::TypeMismatch,
+                                            DiagnosticSeverity::Error,
                                             &format!(
                                                 "Mismatched type for field `{}` on `{}`: expected `{}`, found `{}`",
                                                 f_name, model, expected, found
                                             ),
-                                            span.clone(),
-                                            None,
+                                            field_span,
+                                            DiagMeta {
+                                                related_locations: Vec::new(),
+                                                type_info: Some(TypeInfo {
+                                                    expected: expected.to_string(),
+                                                    actual: found.to_string(),
+                                                    coercible: Some(true),
+                                                }),
+                                                patch,
+                                            },
                                         );
                                     }
                                     BuiltinError::AuthRequiredForReqUser => {
@@ -1329,21 +1423,4 @@ pub fn check(
 ) -> (HirProgram, Vec<Diagnostic>) {
     let checker = TypeChecker::new(source, file, arena);
     checker.check_program(program)
-}
-
-fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
-    let mut line = 1;
-    let mut col = 1;
-    for (idx, ch) in source.char_indices() {
-        if idx >= byte_offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
 }

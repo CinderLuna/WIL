@@ -1,5 +1,5 @@
 use std::fs;
-use wml_diagnostics::DiagnosticCategory;
+use wml_diagnostics::{DiagnosticCategory, DiagnosticSeverity, PatchType};
 use wml_hir::check;
 use wml_syntax::parse;
 
@@ -301,4 +301,45 @@ fn test_typecheck_sec_5001_deduplicated() {
         "Expected exactly 1 WML-SEC-5001 diagnostic, found: {:?}",
         sec_diags
     );
+}
+
+#[test]
+fn test_typecheck_field_type_mismatch_with_scope_variable_patch() {
+    let source = r#"
+    type User { id: int, email: str, hash: str }
+
+    route /api/register (post: {email: str, pass: str}) -> {token: str} {
+        let hash = crypto.hash(pass)
+        let user = db.insert(User, {email: 12345, hash})
+        return {token: jwt.sign({sub: user.id})}
+    }
+    "#;
+
+    let (program, arena) = parse(source).expect("Parse error");
+    let (_hir, diags) = check(&program, &arena, source, "examples/auth.wml");
+
+    assert_eq!(diags.len(), 1);
+    let diag = &diags[0];
+    assert_eq!(diag.code, "WML-TYP-2041");
+    assert_eq!(diag.category, DiagnosticCategory::TypeMismatch);
+    assert_eq!(diag.severity, DiagnosticSeverity::Error);
+    assert!(diag.context_slice.is_some());
+    let slice = diag.context_slice.as_ref().unwrap();
+    assert_eq!(slice.focus_line, 6);
+
+    let type_info = diag.type_info.as_ref().expect("Expected type_info");
+    assert_eq!(type_info.expected, "str");
+    assert_eq!(type_info.actual, "int");
+
+    let patch = diag
+        .suggested_patch
+        .as_ref()
+        .expect("Expected suggested_patch");
+    assert_eq!(patch.patch_type, PatchType::AutoApply);
+    assert_eq!(patch.confidence, 0.98);
+    assert_eq!(patch.replacement.new_text, "email");
+    assert!(patch.patch_unified.is_some());
+    let diff = patch.patch_unified.as_ref().unwrap();
+    assert!(diff.contains("-        let user = db.insert(User, {email: 12345, hash})"));
+    assert!(diff.contains("+        let user = db.insert(User, {email: email, hash})"));
 }
