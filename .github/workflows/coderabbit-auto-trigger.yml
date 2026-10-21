@@ -1,0 +1,46 @@
+name: Auto-Trigger CodeRabbit Review
+
+on:
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  auto-trigger-review:
+    # Trigger only when coderabbitai[bot] comments on a Pull Request
+    if: >-
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.user.login, 'coderabbitai')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto-check CodeRabbit trigger review checkbox
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            const commentId = context.payload.comment.id;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issueNumber = context.payload.issue.number;
+
+            // Target the specific 'Trigger review' task list checkbox
+            const triggerPattern = /(- \[[ ]\])(\s*(?:<!--.*?-->\s*)?🔍?\s*Trigger review)/i;
+
+            if (triggerPattern.test(body)) {
+              console.log(`Found unchecked CodeRabbit 'Trigger review' checkbox on PR #${issueNumber}.`);
+              const updatedBody = body.replace(triggerPattern, '- [x]$2');
+              
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: commentId,
+                body: updatedBody,
+              });
+              console.log(`Successfully checked the trigger review checkbox for comment ID ${commentId}!`);
+            } else {
+              console.log('No pending Trigger review checkbox in this comment.');
+            }
