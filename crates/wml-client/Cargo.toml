@@ -1,0 +1,11 @@
+[package]
+name = "wml-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+wml-syntax = { path = "../wml-syntax" }
+wml-diagnostics = { path = "../wml-diagnostics" }
+thiserror = { workspace = true }

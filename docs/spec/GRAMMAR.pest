@@ -1,0 +1,170 @@
+// WML (Web Minimalistic Language) Formal Grammar
+// Defined in Pest (Parsing Expression Grammar) for Rust
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ ("//" ~ (!"\n" ~ ANY)* ~ "\n") | ("/*" ~ (!"*/" ~ ANY)* ~ "*/") }
+
+// -------------------------------------------------------------
+// Top-Level Program Structure
+// -------------------------------------------------------------
+program = { SOI ~ item* ~ EOI }
+
+item = {
+    type_decl
+  | route_decl
+  | page_decl
+  | ui_decl
+  | fn_decl
+  | db_schema_decl
+}
+
+// -------------------------------------------------------------
+// Identifiers and Literals
+// -------------------------------------------------------------
+ident      = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+route_path = @{ "/" ~ (ASCII_ALPHANUMERIC | "_" | "-" | "/" | "{" | "}")* }
+
+int_lit    = @{ "-"? ~ ASCII_DIGIT+ }
+float_lit  = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+string_lit = ${ "\"" ~ inner_str ~ "\"" }
+inner_str  = @{ (!("\"" | "\\") ~ ANY | "\\" ~ ANY)* }
+bool_lit   = { "true" | "false" }
+null_lit   = { "null" }
+
+literal = { float_lit | int_lit | string_lit | bool_lit | null_lit }
+
+// -------------------------------------------------------------
+// Types
+// -------------------------------------------------------------
+type_ref = { primitive_type | custom_type | record_type | array_type | optional_type }
+primitive_type = { "int" | "float" | "str" | "bool" | "any" | "void" }
+custom_type    = { ident }
+array_type     = { "[" ~ type_ref ~ "]" }
+optional_type  = { type_ref ~ "?" }
+record_type    = { "{" ~ (record_field ~ ("," ~ record_field)* ~ ","?)? ~ "}" }
+record_field   = { ident ~ ":" ~ type_ref }
+
+type_decl = { "type" ~ ident ~ "{" ~ (type_field ~ ("," ~ type_field)* ~ ","?)? ~ "}" }
+type_field = { ident ~ ":" ~ type_ref }
+
+// Database schema declaration (SQL DDL mapped to native types)
+db_schema_decl = { "schema" ~ ident ~ "{" ~ (schema_field ~ ("," ~ schema_field)* ~ ","?)? ~ "}" }
+schema_field = { ident ~ ":" ~ type_ref ~ field_modifier* }
+field_modifier = { "pk" | "unique" | "indexed" | "auto" | ("default(" ~ expr ~ ")") }
+
+// -------------------------------------------------------------
+// Functions and Actions
+// -------------------------------------------------------------
+fn_decl = { "fn" ~ ident ~ param_list ~ ("->" ~ type_ref)? ~ block }
+param_list = { "(" ~ (param ~ ("," ~ param)* ~ ","?)? ~ ")" }
+param = { ident ~ ":" ~ type_ref ~ ("=" ~ expr)? }
+
+// -------------------------------------------------------------
+// Route Declarations (APIs & Endpoints)
+// -------------------------------------------------------------
+route_decl = { "route" ~ route_path ~ route_config? ~ ("->" ~ type_ref)? ~ block }
+route_config = { "(" ~ (route_opt ~ ("," ~ route_opt)* ~ ","?)? ~ ")" }
+route_opt = {
+    ("post:" ~ type_ref)
+  | ("get:" ~ type_ref)
+  | ("put:" ~ type_ref)
+  | ("delete:" ~ type_ref)
+  | ("auth:" ~ bool_lit)
+  | ("rate_limit:" ~ int_lit)
+}
+
+// -------------------------------------------------------------
+// Full-Stack Server-Rendered UI (page) and Client Islands (ui)
+// -------------------------------------------------------------
+page_decl = { "page" ~ route_path ~ route_config? ~ block }
+ui_decl   = { "ui" ~ ident ~ param_list ~ block }
+
+// -------------------------------------------------------------
+// Statements and Control Flow
+// -------------------------------------------------------------
+block = { "{" ~ stmt* ~ "}" }
+
+stmt = {
+    let_stmt
+  | return_stmt
+  | throw_stmt
+  | if_stmt
+  | for_stmt
+  | action_stmt
+  | expr_stmt
+}
+
+let_stmt    = { "let" ~ ident ~ (":" ~ type_ref)? ~ "=" ~ expr ~ ";" }
+return_stmt = { "return" ~ expr? ~ ";" }
+throw_stmt  = { "throw" ~ int_lit ~ expr? ~ ";" }
+action_stmt = { "action" ~ ident ~ param_list ~ block }
+
+if_stmt  = { "if" ~ expr ~ block ~ ("else" ~ (if_stmt | block))? }
+for_stmt = { "for" ~ ident ~ "in" ~ expr ~ block }
+
+expr_stmt = { expr ~ ";" }
+
+// -------------------------------------------------------------
+// Expressions
+// -------------------------------------------------------------
+expr = { null_coalesce_expr }
+
+null_coalesce_expr = { logical_or_expr ~ ("??" ~ (throw_expr | logical_or_expr))* }
+throw_expr = { "throw" ~ int_lit ~ expr? }
+
+logical_or_expr  = { logical_and_expr ~ ("||" ~ logical_and_expr)* }
+logical_and_expr = { equality_expr ~ ("&&" ~ equality_expr)* }
+
+equality_expr   = { relational_expr ~ (("==" | "!=") ~ relational_expr)* }
+relational_expr = { additive_expr ~ (("<=" | ">=" | "<" | ">") ~ additive_expr)* }
+
+additive_expr       = { multiplicative_expr ~ (("+" | "-") ~ multiplicative_expr)* }
+multiplicative_expr = { unary_expr ~ (("*" | "/" | "%") ~ unary_expr)* }
+
+unary_expr = { ("!" | "-")* ~ primary_expr }
+
+primary_expr = {
+    literal
+  | jsx_element
+  | object_lit
+  | array_lit
+  | call_or_member_expr
+  | ident
+  | "(" ~ expr ~ ")"
+}
+
+object_lit   = { "{" ~ (object_field ~ ("," ~ object_field)* ~ ","?)? ~ "}" }
+object_field = { (ident ~ ":" ~ expr) | ident }
+
+array_lit = { "[" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ "]" }
+
+call_or_member_expr = {
+    ident ~ (member_access | call_expr)+
+}
+
+member_access = { "." ~ ident }
+call_expr     = { "(" ~ (call_arg ~ ("," ~ call_arg)* ~ ","?)? ~ ")" }
+call_arg      = { (ident ~ ":" ~ expr) | expr }
+
+// -------------------------------------------------------------
+// JSX / Reactive Template Expressions (First-class in WML)
+// -------------------------------------------------------------
+jsx_element = {
+    ("<" ~ jsx_tag_name ~ jsx_attr* ~ "/>")
+  | ("<" ~ jsx_tag_name ~ jsx_attr* ~ ">" ~ jsx_child* ~ "</" ~ jsx_tag_name ~ ">")
+}
+
+jsx_tag_name = @{ ASCII_ALPHA ~ ASCII_ALPHANUMERIC* }
+
+jsx_attr = {
+    jsx_attr_name ~ ("=" ~ (string_lit | ("{" ~ expr ~ "}")))?
+}
+jsx_attr_name = @{ (ASCII_ALPHA | "@" | ":") ~ (ASCII_ALPHANUMERIC | "-" | "_" | "." | ":")* }
+
+jsx_child = {
+    jsx_element
+  | ("{" ~ expr ~ "}")
+  | jsx_text
+}
+
+jsx_text = @{ (!("<" | "{" | "}") ~ ANY)+ }

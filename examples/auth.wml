@@ -1,0 +1,20 @@
+// WML Canonical Full Auth Specification (~10 lines of executable logic)
+// Zero imports. Zero ORM boilerplate. Argon2id + Ed25519/HMAC JWT native.
+
+type User { id: int, email: str, hash: str }
+
+route /auth/signup (post: {email: str, pass: str}) -> {token: str} {
+    let hash = crypto.hash(pass)
+    let user = db.insert(User, {email, hash})
+    return {token: jwt.sign({sub: user.id})}
+}
+
+route /auth/login (post: {email: str, pass: str}) -> {token: str} {
+    let user = db.get(User, email: email) ?? throw 401 "Invalid credentials"
+    crypto.verify(pass, user.hash) ?? throw 401 "Invalid credentials"
+    return {token: jwt.sign({sub: user.id})}
+}
+
+route /api/me (auth: true) -> User {
+    return db.get(User, id: req.user.id) ?? throw 404
+}

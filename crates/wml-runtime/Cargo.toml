@@ -1,0 +1,10 @@
+[package]
+name = "wml-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+httparse = { workspace = true }
+thiserror = { workspace = true }

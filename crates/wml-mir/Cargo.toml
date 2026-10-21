@@ -1,0 +1,12 @@
+[package]
+name = "wml-mir"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+wml-hir = { path = "../wml-hir" }
+wml-diagnostics = { path = "../wml-diagnostics" }
+serde = { workspace = true }
+thiserror = { workspace = true }

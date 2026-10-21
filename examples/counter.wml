@@ -1,0 +1,40 @@
+// Full-Stack Modern PHP Evolution: Server Page + Reactive UI Island
+// Single-file architecture with dual-target compilation (Rust Cranelift/LLVM server + Micro-signals client)
+
+schema Stats {
+    id: int pk auto,
+    clicks: int default(0)
+}
+
+// Server-rendered Page (Runs on native Rust Cranelift/LLVM backend)
+page /dashboard {
+    let stat = db.get(Stats, id: 1) ?? db.insert(Stats, {clicks: 0})
+
+    <main class="container">
+        <h1>"Live Analytics Dashboard"</h1>
+        <p>"Total server-recorded clicks: " {stat.clicks}</p>
+        
+        // Hydrated Client Island: Pre-rendered on server, reactive on client
+        <ClickIsland initial={stat.clicks} />
+    </main>
+}
+
+// Client Reactive Island (Compiles to static micro-signals JS, zero node_modules)
+ui ClickIsland(initial: int) {
+    let count = signal(initial)
+
+    // RPC action executed on server, called seamlessly from client
+    action syncClicks(delta: int) -> int {
+        let updated = db.update(Stats, id: 1, {clicks: clicks + delta})
+        return updated.clicks
+    }
+
+    <div class="counter-card">
+        <button onclick={
+            count += 1;
+            syncClicks(1);
+        }>
+            "Clicked " {count} " times"
+        </button>
+    </div>
+}

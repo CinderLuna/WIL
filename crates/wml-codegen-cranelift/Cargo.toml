@@ -1,0 +1,11 @@
+[package]
+name = "wml-codegen-cranelift"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+wml-mir = { path = "../wml-mir" }
+wml-diagnostics = { path = "../wml-diagnostics" }
+thiserror = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name = "wml-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wml"
+path = "src/main.rs"
+
+[dependencies]
+wml-diagnostics = { path = "../wml-diagnostics" }
+wml-syntax = { path = "../wml-syntax" }
+wml-hir = { path = "../wml-hir" }
+wml-mir = { path = "../wml-mir" }
+wml-runtime = { path = "../wml-runtime" }
+wml-codegen-cranelift = { path = "../wml-codegen-cranelift" }
+wml-codegen-llvm = { path = "../wml-codegen-llvm" }
+wml-client = { path = "../wml-client" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

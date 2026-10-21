@@ -1,0 +1,13 @@
+[package]
+name = "wml-syntax"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+wml-diagnostics = { path = "../wml-diagnostics" }
+logos = { workspace = true }
+la-arena = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

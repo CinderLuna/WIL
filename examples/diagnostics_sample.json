@@ -1,0 +1,78 @@
+{
+  "protocol_version": "1.0.0",
+  "timestamp": "2026-10-21T15:05:00Z",
+  "status": "error",
+  "diagnostics": [
+    {
+      "id": "diag_8f0a2d4e7c1b",
+      "code": "WML-TYP-2041",
+      "category": "TypeMismatch",
+      "severity": "error",
+      "message": "Mismatched types: Expected type `str`, found type `int` in assignment to `email`.",
+      "primary_location": {
+        "file": "F:/DEV/WML/examples/auth.wml",
+        "span": {
+          "start_line": 6,
+          "start_col": 37,
+          "end_line": 6,
+          "end_col": 42
+        },
+        "byte_range": {
+          "start": 178,
+          "end": 183
+        }
+      },
+      "related_locations": [
+        {
+          "location": {
+            "file": "F:/DEV/WML/examples/auth.wml",
+            "span": {
+              "start_line": 4,
+              "start_col": 26,
+              "end_line": 4,
+              "end_col": 36
+            },
+            "byte_range": {
+              "start": 98,
+              "end": 108
+            }
+          },
+          "message": "Field `email` was declared as `str` in schema `User`"
+        }
+      ],
+      "type_info": {
+        "expected": "str",
+        "actual": "int",
+        "coercible": true
+      },
+      "context_slice": {
+        "focus_line": 6,
+        "lines": [
+          { "line_number": 5, "content": "    let hash = crypto.hash(pass)", "is_focus": false },
+          { "line_number": 6, "content": "    let user = db.insert(User, {email: 12345, hash})", "is_focus": true },
+          { "line_number": 7, "content": "    return {token: jwt.sign({sub: user.id})}", "is_focus": false }
+        ]
+      },
+      "suggested_patch": {
+        "patch_type": "AUTO_APPLY",
+        "confidence": 0.98,
+        "explanation": "Replace integer literal with variable `email` passed in route payload parameter.",
+        "replacement": {
+          "file": "F:/DEV/WML/examples/auth.wml",
+          "byte_range": {
+            "start": 178,
+            "end": 183
+          },
+          "new_text": "email"
+        },
+        "patch_unified": "--- F:/DEV/WML/examples/auth.wml\n+++ F:/DEV/WML/examples/auth.wml\n@@ -6,1 +6,1 @@\n-    let user = db.insert(User, {email: 12345, hash})\n+    let user = db.insert(User, {email: email, hash})"
+      }
+    }
+  ],
+  "compilation_metrics": {
+    "duration_ms": 1.42,
+    "lines_parsed": 19,
+    "tokens_evaluated": 118,
+    "target": "check-only"
+  }
+}

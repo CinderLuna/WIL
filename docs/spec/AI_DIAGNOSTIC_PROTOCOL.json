@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wml-lang.org/schemas/ai-diagnostic-protocol.v1.json",
+  "title": "WmlAiDiagnosticProtocol",
+  "description": "Standardized AI-first diagnostic error and self-healing schema emitted by the WML compiler, typechecker, and runtime.",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "timestamp",
+    "status",
+    "diagnostics"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "enum": ["1.0.0"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "error", "warning"]
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Diagnostic"
+      }
+    },
+    "compilation_metrics": {
+      "type": "object",
+      "properties": {
+        "duration_ms": { "type": "number" },
+        "lines_parsed": { "type": "integer" },
+        "tokens_evaluated": { "type": "integer" },
+        "target": { "type": "string", "enum": ["cranelift-jit", "llvm-aot", "check-only"] }
+      }
+    }
+  },
+  "$defs": {
+    "Diagnostic": {
+      "type": "object",
+      "required": [
+        "id",
+        "code",
+        "category",
+        "severity",
+        "message",
+        "primary_location"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique deterministic hash identifier for this specific diagnostic instance."
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^WML-(SYN|TYP|SEC|RES|DB|RUN)-[0-9]{4}$",
+          "description": "Machine-readable standardized error code (e.g., WML-TYP-2041)."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "SyntaxError",
+            "TypeMismatch",
+            "UndefinedIdentifier",
+            "UncheckedNullability",
+            "SecurityViolation",
+            "DatabaseConstraint",
+            "RoutingConflict",
+            "UnusedDeclaration",
+            "RuntimePanic"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["error", "warning", "info", "hint"]
+        },
+        "message": {
+          "type": "string",
+          "description": "Concise human-and-machine-readable description of the error."
+        },
+        "primary_location": {
+          "$ref": "#/$defs/SourceLocation"
+        },
+        "related_locations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RelatedLocation"
+          }
+        },
+        "type_info": {
+          "type": "object",
+          "properties": {
+            "expected": { "type": "string" },
+            "actual": { "type": "string" },
+            "coercible": { "type": "boolean" }
+          }
+        },
+        "context_slice": {
+          "$ref": "#/$defs/ContextSlice"
+        },
+        "suggested_patch": {
+          "$ref": "#/$defs/SuggestedPatch"
+        }
+      }
+    },
+    "SourceLocation": {
+      "type": "object",
+      "required": ["file", "span", "byte_range"],
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "Absolute or workspace-relative path to the source file."
+        },
+        "span": {
+          "type": "object",
+          "required": ["start_line", "start_col", "end_line", "end_col"],
+          "properties": {
+            "start_line": { "type": "integer", "minimum": 1 },
+            "start_col": { "type": "integer", "minimum": 1 },
+            "end_line": { "type": "integer", "minimum": 1 },
+            "end_col": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "byte_range": {
+          "type": "object",
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "RelatedLocation": {
+      "type": "object",
+      "required": ["location", "message"],
+      "properties": {
+        "location": { "$ref": "#/$defs/SourceLocation" },
+        "message": { "type": "string" }
+      }
+    },
+    "ContextSlice": {
+      "type": "object",
+      "required": ["lines", "focus_line"],
+      "properties": {
+        "focus_line": { "type": "integer" },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["line_number", "content"],
+            "properties": {
+              "line_number": { "type": "integer" },
+              "content": { "type": "string" },
+              "is_focus": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "SuggestedPatch": {
+      "type": "object",
+      "required": [
+        "patch_type",
+        "confidence",
+        "explanation",
+        "replacement"
+      ],
+      "properties": {
+        "patch_type": {
+          "type": "string",
+          "enum": [
+            "AUTO_APPLY",
+            "USER_CONFIRM",
+            "ALTERNATIVE_CHOICE"
+          ],
+          "description": "Indicates whether the patch is safe for zero-prompt auto-application by AI agents."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Confidence score calculated by semantic distance, symbol table lookup, or type coercion rules."
+        },
+        "explanation": {
+          "type": "string",
+          "description": "Why this patch works and what potential side-effects exist."
+        },
+        "replacement": {
+          "type": "object",
+          "required": ["file", "byte_range", "new_text"],
+          "properties": {
+            "file": { "type": "string" },
+            "byte_range": {
+              "type": "object",
+              "required": ["start", "end"],
+              "properties": {
+                "start": { "type": "integer" },
+                "end": { "type": "integer" }
+              }
+            },
+            "new_text": { "type": "string" }
+          }
+        },
+        "patch_unified": {
+          "type": "string",
+          "description": "Standard git-compatible unified diff representation of the fix."
+        }
+      }
+    }
+  }
+}
