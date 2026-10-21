@@ -1,9 +1,18 @@
 use clap::{Parser, Subcommand};
+use std::fs;
 use std::path::PathBuf;
-use wml_diagnostics::{DiagnosticReport, DiagnosticStatus, DiagnosticSummary};
+use wml_diagnostics::{
+    ByteRange, Diagnostic, DiagnosticCategory, DiagnosticReport, DiagnosticSeverity,
+    DiagnosticStatus, DiagnosticSummary, Location, Span,
+};
+use wml_syntax::parse;
 
 #[derive(Parser, Debug)]
-#[command(name = "wml", version = "0.1.0", about = "Web Minimalistic Language Compiler & Runtime")]
+#[command(
+    name = "wml",
+    version = "0.1.0",
+    about = "Web Minimalistic Language Compiler & Runtime"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -37,29 +46,198 @@ enum Commands {
     },
 }
 
+fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (idx, ch) in source.char_indices() {
+        if idx >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let current_timestamp = chrono::Utc::now().to_rfc3339();
 
     match cli.command {
         Commands::Check { file, format } => {
-            if format == "ai-json" {
-                let report = DiagnosticReport {
-                    protocol_version: "1.0.0".to_string(),
-                    status: DiagnosticStatus::Success,
-                    timestamp: "2026-10-21T00:00:00Z".to_string(),
-                    summary: DiagnosticSummary::default(),
-                    diagnostics: vec![],
-                };
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!("Checking {}... OK (0 errors)", file.display());
+            let source = match fs::read_to_string(&file) {
+                Ok(s) => s,
+                Err(err) => {
+                    if format == "ai-json" {
+                        let report = DiagnosticReport {
+                            protocol_version: "1.0.0".to_string(),
+                            status: DiagnosticStatus::Error,
+                            timestamp: current_timestamp,
+                            summary: DiagnosticSummary {
+                                total_errors: 1,
+                                total_warnings: 0,
+                                auto_fixable: 0,
+                            },
+                            diagnostics: vec![Diagnostic {
+                                id: "diag_io_001".to_string(),
+                                code: "WML-IO-1001".to_string(),
+                                category: DiagnosticCategory::RuntimePanic,
+                                severity: DiagnosticSeverity::Error,
+                                message: format!("Failed to read file {}: {}", file.display(), err),
+                                primary_location: Location {
+                                    file: file.display().to_string(),
+                                    span: Span {
+                                        start_line: 1,
+                                        start_col: 1,
+                                        end_line: 1,
+                                        end_col: 1,
+                                    },
+                                    byte_range: ByteRange { start: 0, end: 0 },
+                                },
+                                suggested_patch: None,
+                            }],
+                        };
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        eprintln!("Error reading file {}: {}", file.display(), err);
+                    }
+                    std::process::exit(1);
+                }
+            };
+
+            match parse(&source) {
+                Ok((program, arena)) => {
+                    let file_str = file.display().to_string();
+                    let (_hir, diags) = wml_hir::check(&program, &arena, &source, &file_str);
+
+                    let total_errors = diags
+                        .iter()
+                        .filter(|d| d.severity == DiagnosticSeverity::Error)
+                        .count();
+                    let total_warnings = diags
+                        .iter()
+                        .filter(|d| d.severity == DiagnosticSeverity::Warning)
+                        .count();
+                    let auto_fixable = diags.iter().filter(|d| d.suggested_patch.is_some()).count();
+
+                    if format == "ai-json" {
+                        let status = if total_errors > 0 {
+                            DiagnosticStatus::Error
+                        } else if total_warnings > 0 {
+                            DiagnosticStatus::Warning
+                        } else {
+                            DiagnosticStatus::Success
+                        };
+
+                        let report = DiagnosticReport {
+                            protocol_version: "1.0.0".to_string(),
+                            status,
+                            timestamp: current_timestamp,
+                            summary: DiagnosticSummary {
+                                total_errors,
+                                total_warnings,
+                                auto_fixable,
+                            },
+                            diagnostics: diags,
+                        };
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                        if total_errors > 0 {
+                            std::process::exit(1);
+                        }
+                    } else {
+                        if total_errors > 0 {
+                            for d in &diags {
+                                eprintln!(
+                                    "Error [{}] in {}:{}:{}: {}",
+                                    d.code,
+                                    d.primary_location.file,
+                                    d.primary_location.span.start_line,
+                                    d.primary_location.span.start_col,
+                                    d.message
+                                );
+                                if let Some(patch) = &d.suggested_patch {
+                                    eprintln!("  Suggested fix: {}", patch.explanation);
+                                }
+                            }
+                            std::process::exit(1);
+                        } else {
+                            println!(
+                                "Checking {}... OK ({} top-level items parsed and typechecked, 0 errors)",
+                                file.display(),
+                                program.items.len()
+                            );
+                        }
+                    }
+                }
+                Err(parse_err) => {
+                    let (start_line, start_col) = byte_to_line_col(&source, parse_err.span.start);
+                    let (end_line, end_col) = byte_to_line_col(&source, parse_err.span.end);
+
+                    let diagnostic = Diagnostic {
+                        id: format!("diag_{:x}", parse_err.span.start),
+                        code: "WML-SYN-1001".to_string(),
+                        category: DiagnosticCategory::SyntaxError,
+                        severity: DiagnosticSeverity::Error,
+                        message: parse_err.message.clone(),
+                        primary_location: Location {
+                            file: file.display().to_string(),
+                            span: Span {
+                                start_line,
+                                start_col,
+                                end_line,
+                                end_col,
+                            },
+                            byte_range: ByteRange {
+                                start: parse_err.span.start,
+                                end: parse_err.span.end,
+                            },
+                        },
+                        suggested_patch: None,
+                    };
+
+                    if format == "ai-json" {
+                        let report = DiagnosticReport {
+                            protocol_version: "1.0.0".to_string(),
+                            status: DiagnosticStatus::Error,
+                            timestamp: current_timestamp,
+                            summary: DiagnosticSummary {
+                                total_errors: 1,
+                                total_warnings: 0,
+                                auto_fixable: 0,
+                            },
+                            diagnostics: vec![diagnostic],
+                        };
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        eprintln!(
+                            "Error in {}:{}:{}: {}",
+                            file.display(),
+                            start_line,
+                            start_col,
+                            parse_err.message
+                        );
+                    }
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Dev { file, port } => {
-            println!("Starting WML Cranelift JIT development server for {} on :{}", file.display(), port);
+            println!(
+                "Starting WML Cranelift JIT development server for {} on :{}",
+                file.display(),
+                port
+            );
         }
         Commands::Build { file, release } => {
-            println!("Building static binary for {} (release={})...", file.display(), release);
+            println!(
+                "Building static binary for {} (release={})...",
+                file.display(),
+                release
+            );
         }
     }
 

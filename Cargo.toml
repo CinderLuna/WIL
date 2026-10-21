@@ -28,3 +28,4 @@ la-arena = "0.3"
 logos = "0.14"
 ariadne = "0.4"
 httparse = "1.9"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
