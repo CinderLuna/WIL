@@ -9,6 +9,12 @@ pub struct RequestArena {
     base_ptr: *mut u8,
 }
 
+impl Default for RequestArena {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RequestArena {
     pub fn new() -> Self {
         let layout = Layout::from_size_align(CHUNK_SIZE, 64).expect("Invalid layout");
