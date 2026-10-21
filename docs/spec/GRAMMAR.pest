@@ -97,7 +97,7 @@ stmt = {
 let_stmt    = { "let" ~ ident ~ (":" ~ type_ref)? ~ "=" ~ expr ~ ";" }
 return_stmt = { "return" ~ expr? ~ ";" }
 throw_stmt  = { "throw" ~ int_lit ~ expr? ~ ";" }
-action_stmt = { "action" ~ ident ~ param_list ~ block }
+action_stmt = { "action" ~ ident ~ param_list ~ ("->" ~ type_ref)? ~ block }
 
 if_stmt  = { "if" ~ expr ~ block ~ ("else" ~ (if_stmt | block))? }
 for_stmt = { "for" ~ ident ~ "in" ~ expr ~ block }

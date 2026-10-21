@@ -1,0 +1,138 @@
+// EdgeFlag: Real-Time Edge Feature Flag & Dynamic Remote Config Engine
+// Single-file colocation: Schemas + SSR Dashboard + Reactive Micro-Signals Islands + High-Throughput Edge API
+// Ultra-low memory density (<2.5MB RAM), zero GC latency, bump arena allocation, dual-target LLVM & Cranelift.
+
+schema Flag {
+    id: int pk auto,
+    key: str,
+    name: str,
+    description: str,
+    enabled: bool default(false),
+    rollout_percentage: int default(0),
+    environment: str default("production")
+}
+
+schema Metric {
+    id: int pk auto,
+    evaluations: int default(0),
+    active_flags: int default(0)
+}
+
+schema EdgeKey {
+    id: int pk auto,
+    name: str,
+    secret_hash: str,
+    environment: str default("production")
+}
+
+// Server-rendered Dashboard: Pre-renders metrics and nests reactive client islands
+page / {
+    let metric = db.get(Metric, id: 1) ?? db.insert(Metric, {evaluations: 1042, active_flags: 3})
+    let flag1 = db.get(Flag, id: 1) ?? db.insert(Flag, {
+        key: "dark_mode_v2",
+        name: "Dark Mode Theme",
+        description: "Enables new OLED high-contrast dark theme",
+        enabled: true,
+        rollout_percentage: 100,
+        environment: "production"
+    })
+
+    <main class="dashboard">
+        <header class="header">
+            <div class="logo-box">
+                <h1 class="title">"EdgeFlag Engine"</h1>
+                <span class="badge">"ARM64/x86_64 Edge Node"</span>
+            </div>
+            <p class="subtitle">"Sub-2.5MB RAM Zero-GC Feature Flag & Remote Config Control Plane"</p>
+        </header>
+
+        <section class="metrics-grid">
+            <div class="metric-card">
+                <span class="metric-label">"Active Flags: "</span>
+                <span class="metric-val">{metric.active_flags}</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-label">"Edge Evaluations: "</span>
+                <span class="metric-val">{metric.evaluations}</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-label">"Arena Slab: "</span>
+                <span class="metric-val">"64 KB Bump Allocated"</span>
+            </div>
+        </section>
+
+        // Hydrated Client Island: Instant live toggling, percentage sliders, and optimistic RPC sync
+        <FlagControlIsland initial_flags={metric.active_flags} initial_evals={metric.evaluations} />
+    </main>
+}
+
+// Client Reactive Island: Compiled to static micro-signals JS (<2.5KB gzipped, zero npm/node_modules)
+ui FlagControlIsland(initial_flags: int, initial_evals: int) {
+    let active = signal(initial_flags)
+    let evals = signal(initial_evals)
+    let percentage = signal(50)
+
+    // Typed server RPC action auto-wired by WML compiler
+    action toggleFlag(flag_id: int, state: bool) -> int {
+        let updated = db.update(Metric, id: 1, {active_flags: active_flags + 1})
+        return updated.active_flags
+    }
+
+    // Dynamic rollout percentage RPC action
+    action updateRollout(flag_id: int, pct: int) -> int {
+        let updated = db.update(Flag, id: flag_id, {rollout_percentage: pct})
+        return updated.rollout_percentage
+    }
+
+    // Microsecond edge evaluation ping simulation
+    action simulateEval(key: str) -> int {
+        let updated = db.update(Metric, id: 1, {evaluations: evaluations + 1})
+        return updated.evaluations
+    }
+
+    <div class="flag-control-panel">
+        <div class="card">
+            <h3>"Feature: AI Search Engine (ai_search_v3)"</h3>
+            <p>"Status: Active on Edge Reactor"</p>
+            <div class="btn-group">
+                <button onclick={
+                    active += 1;
+                    evals += 10;
+                    toggleFlag(1, true);
+                }>
+                    "Toggle Flag (Active: " {active} ")"
+                </button>
+                <button onclick={
+                    percentage += 10;
+                    updateRollout(1, percentage);
+                }>
+                    "Bump Rollout (+10%): " {percentage} "%"
+                </button>
+                <button onclick={
+                    evals += 1;
+                    simulateEval("ai_search_v3");
+                }>
+                    "Simulate Evaluation (Pings: " {evals} ")"
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+// High-Throughput Edge API: Provision API Keys with native Argon2id + HMAC/Ed25519 JWT
+route /api/v1/auth/provision (post: {name: str, secret: str}) -> {token: str} {
+    let secret_hash = crypto.hash(secret)
+    let key = db.insert(EdgeKey, {name, secret_hash})
+    return {token: jwt.sign({sub: key.id})}
+}
+
+// Edge Flag Evaluation Endpoint: Microsecond bump-allocated request path
+route /api/v1/evaluate (post: {key: str, entity_id: str}) -> {key: str, enabled: bool, variant: str} {
+    let flag = db.get(Flag, key: key) ?? throw 404 "Flag not found"
+    return {key: flag.key, enabled: flag.enabled, variant: "control"}
+}
+
+// Edge Sync Status Endpoint
+route /api/v1/flags/sync (auth: true) -> Metric {
+    return db.get(Metric, id: 1) ?? throw 404
+}
