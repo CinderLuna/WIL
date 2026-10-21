@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 wml-hir = { path = "../wml-hir" }
+wml-syntax = { path = "../wml-syntax" }
 wml-diagnostics = { path = "../wml-diagnostics" }
 serde = { workspace = true }
 thiserror = { workspace = true }

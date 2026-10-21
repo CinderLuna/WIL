@@ -1,25 +1,9 @@
-#[derive(Debug, Clone)]
-pub struct MirModule {
-    pub name: String,
-    pub functions: Vec<MirFunction>,
-}
+pub mod escape;
+pub mod ir;
+pub mod lower;
+pub mod opt;
 
-#[derive(Debug, Clone)]
-pub struct MirFunction {
-    pub name: String,
-    pub blocks: Vec<BasicBlock>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BasicBlock {
-    pub id: usize,
-    pub instructions: Vec<MirInst>,
-}
-
-#[derive(Debug, Clone)]
-pub enum MirInst {
-    AllocReqArena { size: usize, dest: usize },
-    AllocGlobal { size: usize, dest: usize },
-    HttpWriteChunk { stream_id: usize, buffer_id: usize },
-    Return { val: Option<usize> },
-}
+pub use escape::{EscapeAnalysis, EscapeReport};
+pub use ir::*;
+pub use lower::MirLowerer;
+pub use opt::MirOptimizer;
