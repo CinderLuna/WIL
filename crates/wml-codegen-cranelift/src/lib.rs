@@ -78,6 +78,11 @@ impl CraneliftJitBackend {
         jit_builder.symbol("wml_jwt_verify", wml_jwt_verify as *const u8);
         jit_builder.symbol("wml_res_set_body", wml_res_set_body as *const u8);
         jit_builder.symbol("wml_res_set_status", wml_res_set_status as *const u8);
+        jit_builder.symbol(
+            "wml_res_set_content_type",
+            wml_res_set_content_type as *const u8,
+        );
+        jit_builder.symbol("wml_res_set_body_i64", wml_res_set_body_i64 as *const u8);
         jit_builder.symbol("wml_db_insert", wml_db_insert as *const u8);
         jit_builder.symbol("wml_db_get", wml_db_get as *const u8);
         jit_builder.symbol("wml_record_get_field", wml_record_get_field as *const u8);
@@ -125,6 +130,11 @@ impl CraneliftJitBackend {
             ("wml_res_set_body", &[ptr_type, ptr_type, types::I64], None),
             ("wml_res_set_status", &[ptr_type, types::I16], None),
             (
+                "wml_res_set_content_type",
+                &[ptr_type, ptr_type, types::I64],
+                None,
+            ),
+            (
                 "wml_db_insert",
                 &[ptr_type, ptr_type, ptr_type],
                 Some(ptr_type),
@@ -139,7 +149,16 @@ impl CraneliftJitBackend {
                 &[ptr_type, ptr_type],
                 Some(ptr_type),
             ),
-            ("wml_req_get_param", &[ptr_type, ptr_type], Some(ptr_type)),
+            (
+                "wml_req_get_param",
+                &[ptr_type, ptr_type, ptr_type],
+                Some(ptr_type),
+            ),
+            (
+                "wml_res_set_body_i64",
+                &[ptr_type, ptr_type, types::I64],
+                None,
+            ),
         ];
 
         for &(name, param_types, ret_type) in runtime_decls {
@@ -315,9 +334,11 @@ impl CraneliftJitBackend {
                         builder.ins().iconst(types::I8, if *b { 1 } else { 0 })
                     }
                     MirInst::Const(MirConstant::Str(s)) => {
-                        let boxed_bytes = s.clone().into_bytes().into_boxed_slice();
+                        let mut bytes = s.clone().into_bytes();
+                        let len_val = bytes.len() as i64;
+                        bytes.push(0); // Null-terminate for C-ABI safety
+                        let boxed_bytes = bytes.into_boxed_slice();
                         let ptr_val = boxed_bytes.as_ptr() as usize as i64;
-                        let len_val = boxed_bytes.len() as i64;
                         self.string_pool.push(boxed_bytes);
 
                         let v_ptr = builder.ins().iconst(ptr_type, ptr_val);

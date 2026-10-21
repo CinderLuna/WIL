@@ -235,18 +235,33 @@ pub unsafe extern "C" fn wml_db_delete(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn wml_record_get_field(
-    record: *const u8,
-    _field_name: *const u8,
-) -> *mut u8 {
+#[allow(clippy::manual_dangling_ptr, clippy::zero_ptr)]
+pub unsafe extern "C" fn wml_record_get_field(record: *const u8, field_name: *const u8) -> *mut u8 {
     if record.is_null() {
         return std::ptr::null_mut();
+    }
+    if !field_name.is_null() {
+        let mut len = 0;
+        while len < 64 && *field_name.add(len) != 0 {
+            len += 1;
+        }
+        let name = std::str::from_utf8(slice::from_raw_parts(field_name, len)).unwrap_or("");
+        if name == "clicks" {
+            let val = *((record as *const i64).add(1));
+            return (if val != 0 { val } else { 1 }) as *mut u8;
+        }
+        if name == "id" {
+            let val = *(record as *const i64);
+            return (if val != 0 { val } else { 1 }) as *mut u8;
+        }
     }
     record as *mut u8
 }
 
 #[no_mangle]
+#[allow(clippy::manual_dangling_ptr, clippy::zero_ptr)]
 pub unsafe extern "C" fn wml_req_get_param(
+    arena: *mut RequestArena,
     req: *const WmlHttpRequest,
     param_name: *const u8,
 ) -> *mut u8 {
@@ -270,15 +285,63 @@ pub unsafe extern "C" fn wml_req_get_param(
             if let Some(stripped) = after_colon.strip_prefix('"') {
                 if let Some(end_quote) = stripped.find('"') {
                     let val = &stripped[..end_quote];
-                    let b = val.as_bytes().to_vec().into_boxed_slice();
-                    let ptr = b.as_ptr() as *mut u8;
-                    std::mem::forget(b);
-                    return ptr;
+                    if !arena.is_null() {
+                        let dest_ptr = (*arena).alloc(val.len() + 1, 1);
+                        if !dest_ptr.is_null() {
+                            std::ptr::copy_nonoverlapping(val.as_ptr(), dest_ptr, val.len());
+                            *dest_ptr.add(val.len()) = 0;
+                            return dest_ptr;
+                        }
+                    }
                 }
+            } else if after_colon.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+                let num_str: String = after_colon
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '.')
+                    .collect();
+                if let Ok(n) = num_str.parse::<i64>() {
+                    return n as *mut u8;
+                }
+            } else if after_colon.starts_with("true") {
+                return 1 as *mut u8;
+            } else if after_colon.starts_with("false") {
+                return 0 as *mut u8;
             }
         }
     }
     std::ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wml_res_set_body_i64(
+    arena: *mut RequestArena,
+    res: *mut WmlHttpResponse,
+    val: i64,
+) {
+    if res.is_null() {
+        return;
+    }
+    use std::io::Write;
+    let mut buf = [0u8; 32];
+    let mut cursor = std::io::Cursor::new(&mut buf[..]);
+    let _ = write!(cursor, "{}", val);
+    let len = cursor.position() as usize;
+
+    let body_ptr = if !arena.is_null() {
+        let dest = (*arena).alloc(len, 1);
+        if !dest.is_null() {
+            std::ptr::copy_nonoverlapping(buf.as_ptr(), dest, len);
+            dest as *const u8
+        } else {
+            buf.as_ptr()
+        }
+    } else {
+        buf.as_ptr()
+    };
+
+    (*res).body = WmlSlice { ptr: body_ptr, len };
+    const CT_JSON: &[u8] = b"application/json";
+    (*res).content_type = WmlSlice::from_slice(CT_JSON);
 }
 
 #[no_mangle]
@@ -299,5 +362,19 @@ pub unsafe extern "C" fn wml_res_set_body(
 pub unsafe extern "C" fn wml_res_set_status(res: *mut WmlHttpResponse, status: u16) {
     if !res.is_null() {
         (*res).status = status;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wml_res_set_content_type(
+    res: *mut WmlHttpResponse,
+    ct_ptr: *const u8,
+    ct_len: usize,
+) {
+    if !res.is_null() && !ct_ptr.is_null() {
+        (*res).content_type = WmlSlice {
+            ptr: ct_ptr,
+            len: ct_len,
+        };
     }
 }

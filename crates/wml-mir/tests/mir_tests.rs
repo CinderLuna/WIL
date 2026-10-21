@@ -57,9 +57,14 @@ fn test_lower_counter_example_to_mir() {
     let lowerer = MirLowerer::new();
     let mir_module = lowerer.lower_program(&hir);
 
-    // Page /dashboard + Action syncClicks
-    assert_eq!(mir_module.routes.len(), 1);
+    // Page /dashboard + Action RPC routes
+    assert_eq!(mir_module.routes.len(), 3);
     assert_eq!(mir_module.routes[0].path, "/dashboard");
+    assert_eq!(mir_module.routes[1].path, "/_wml/rpc/syncClicks");
+    assert_eq!(
+        mir_module.routes[2].path,
+        "/_wml/rpc/ClickIsland/syncClicks"
+    );
     assert_eq!(mir_module.functions.len(), 2); // page handler + RPC action
 }
 

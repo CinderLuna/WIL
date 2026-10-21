@@ -60,8 +60,9 @@ impl MirLowerer {
         // 4. Lower client UI island actions (callable via server RPC)
         for ui in &program.uis {
             for action in &ui.actions {
-                let mir_fn = self.lower_action(action, &ui.name);
+                let (mir_fn, mir_routes) = self.lower_action(action, &ui.name);
                 module.functions.push(mir_fn);
+                module.routes.extend(mir_routes);
             }
         }
 
@@ -134,7 +135,7 @@ impl MirLowerer {
                 let v_val = self.emit_inst(
                     MirInst::CallRuntime {
                         intrinsic: "wml_req_get_param".to_string(),
-                        args: vec![v_req, v_field_name],
+                        args: vec![v_arena, v_req, v_field_name],
                     },
                     mir_ty,
                 );
@@ -281,41 +282,197 @@ impl MirLowerer {
         }
     }
 
-    fn lower_action(&mut self, action: &HirActionDecl, ui_name: &str) -> MirFunction {
+    fn lower_action(
+        &mut self,
+        action: &HirActionDecl,
+        ui_name: &str,
+    ) -> (MirFunction, Vec<MirRoute>) {
         self.reset_fn_state();
 
         let fn_name = format!("wml_action_{}_{}", ui_name, action.name);
         let entry_id = self.new_block();
         self.current_block_idx = 0;
 
-        let mut params = Vec::new();
+        let v_arena = self.new_val();
+        let v_req = self.new_val();
+        let v_res = self.new_val();
+
+        self.arena_ptr = Some(v_arena);
+        self.req_ptr = Some(v_req);
+        self.res_ptr = Some(v_res);
+
+        self.current_blocks[0].params = vec![
+            (v_arena, MirType::Ptr),
+            (v_req, MirType::Ptr),
+            (v_res, MirType::Ptr),
+        ];
+
+        // Unpack action parameters from JSON request body
         for p in &action.params {
-            let v = self.new_val();
-            let ty = Self::type_to_mir(&p.ty);
-            params.push((v, ty));
-            self.locals.insert(p.name.clone(), v);
+            let mir_ty = Self::type_to_mir(&p.ty);
+            let v_param_name = self.emit_inst(
+                MirInst::Const(MirConstant::Str(p.name.clone())),
+                MirType::Slice,
+            );
+            let v_val = self.emit_inst(
+                MirInst::CallRuntime {
+                    intrinsic: "wml_req_get_param".to_string(),
+                    args: vec![v_arena, v_req, v_param_name],
+                },
+                mir_ty,
+            );
+            self.locals.insert(p.name.clone(), v_val);
         }
-        self.current_blocks[0].params = params.clone();
 
         for stmt in &action.body {
-            self.lower_stmt(stmt, false);
+            self.lower_stmt(stmt, true);
         }
 
         if matches!(
             self.current_blocks[self.current_block_idx].terminator,
             MirTerminator::Unreachable
         ) {
-            self.set_terminator(MirTerminator::Return(None));
+            let zero = self.emit_inst(MirInst::Const(MirConstant::Int(0)), MirType::I64);
+            self.set_terminator(MirTerminator::Return(Some(zero)));
         }
 
-        MirFunction {
-            name: fn_name,
-            params,
-            return_ty: Self::type_to_mir(&action.return_type),
+        let mir_fn = MirFunction {
+            name: fn_name.clone(),
+            params: vec![
+                (v_arena, MirType::Ptr),
+                (v_req, MirType::Ptr),
+                (v_res, MirType::Ptr),
+            ],
+            return_ty: MirType::I64,
             blocks: std::mem::take(&mut self.current_blocks),
             entry: entry_id,
-            is_route_handler: false,
+            is_route_handler: true,
+        };
+
+        let routes = vec![
+            MirRoute {
+                method: "POST".to_string(),
+                path: format!("/_wml/rpc/{}", action.name),
+                handler_fn: fn_name.clone(),
+                auth: false,
+                rate_limit: None,
+            },
+            MirRoute {
+                method: "POST".to_string(),
+                path: format!("/_wml/rpc/{}/{}", ui_name, action.name),
+                handler_fn: fn_name,
+                auth: false,
+                rate_limit: None,
+            },
+        ];
+
+        (mir_fn, routes)
+    }
+
+    fn render_jsx_element_to_html(elem: &HirJsxElement) -> String {
+        let mut html = String::new();
+        let is_island = elem
+            .tag
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase());
+
+        if is_island {
+            html.push_str(&format!(
+                r#"<div data-wml-island="{}""#,
+                escape_html(&elem.tag)
+            ));
+            let mut props = Vec::new();
+            for (attr_name, attr_val) in &elem.attrs {
+                if let Some(val_expr) = attr_val {
+                    match &val_expr.kind {
+                        HirExpr::Literal(Literal::Int(n)) => {
+                            props.push(format!("\"{}\":{}", escape_html(attr_name), n));
+                        }
+                        HirExpr::Literal(Literal::Float(f)) => {
+                            props.push(format!("\"{}\":{}", escape_html(attr_name), f));
+                        }
+                        HirExpr::Literal(Literal::Bool(b)) => {
+                            props.push(format!("\"{}\":{}", escape_html(attr_name), b));
+                        }
+                        HirExpr::Literal(Literal::String(s)) => {
+                            props.push(format!(
+                                "\"{}\":\"{}\"",
+                                escape_html(attr_name),
+                                s.replace('\\', "\\\\").replace('"', "\\\"")
+                            ));
+                        }
+                        _ => props.push(format!("\"{}\":0", escape_html(attr_name))),
+                    }
+                }
+            }
+            let props_json = format!("{{{}}}", props.join(","));
+            let escaped_props = props_json.replace('&', "&amp;").replace('\'', "&#39;");
+            html.push_str(&format!(r#" data-wml-props='{}'>"#, escaped_props));
+
+            for child in &elem.children {
+                match child {
+                    HirJsxChild::Element(child_elem) => {
+                        html.push_str(&Self::render_jsx_element_to_html(child_elem));
+                    }
+                    HirJsxChild::Text(text) => {
+                        html.push_str(&escape_html(text));
+                    }
+                    HirJsxChild::Expr(expr) => match &expr.kind {
+                        HirExpr::Literal(Literal::String(s)) => html.push_str(&escape_html(s)),
+                        HirExpr::Literal(Literal::Int(n)) => html.push_str(&n.to_string()),
+                        HirExpr::Literal(Literal::Float(f)) => html.push_str(&f.to_string()),
+                        HirExpr::Literal(Literal::Bool(b)) => html.push_str(&b.to_string()),
+                        _ => {}
+                    },
+                }
+            }
+            html.push_str("</div>");
+        } else {
+            html.push('<');
+            html.push_str(&elem.tag);
+            for (attr_name, attr_val) in &elem.attrs {
+                html.push(' ');
+                html.push_str(attr_name);
+                if let Some(val) = attr_val {
+                    match &val.kind {
+                        HirExpr::Literal(Literal::String(s)) => {
+                            html.push_str(&format!(r#"="{}""#, escape_html(s)));
+                        }
+                        HirExpr::Literal(Literal::Int(n)) => {
+                            html.push_str(&format!(r#"="{}""#, n));
+                        }
+                        HirExpr::Literal(Literal::Bool(b)) => {
+                            html.push_str(&format!(r#"="{}""#, b));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            html.push('>');
+
+            for child in &elem.children {
+                match child {
+                    HirJsxChild::Element(child_elem) => {
+                        html.push_str(&Self::render_jsx_element_to_html(child_elem));
+                    }
+                    HirJsxChild::Text(text) => {
+                        html.push_str(&escape_html(text));
+                    }
+                    HirJsxChild::Expr(expr) => match &expr.kind {
+                        HirExpr::Literal(Literal::String(s)) => html.push_str(&escape_html(s)),
+                        HirExpr::Literal(Literal::Int(n)) => html.push_str(&n.to_string()),
+                        HirExpr::Literal(Literal::Float(f)) => html.push_str(&f.to_string()),
+                        HirExpr::Literal(Literal::Bool(b)) => html.push_str(&b.to_string()),
+                        _ => {}
+                    },
+                }
+            }
+
+            html.push_str(&format!("</{}>", elem.tag));
         }
+
+        html
     }
 
     fn lower_stmt(&mut self, stmt: &HirStmt, in_route: bool) {
@@ -325,15 +482,26 @@ impl MirLowerer {
                 self.locals.insert(name.clone(), v);
             }
             HirStmt::Expr(expr) => {
-                self.lower_expr(expr);
-            }
-            HirStmt::Return { val, .. } => {
-                let ret_val = val.as_ref().map(|e| self.lower_expr(e));
+                let _v = self.lower_expr(expr);
                 if in_route {
-                    if let Some(rv) = ret_val {
+                    if let HirExpr::Jsx(elem) = &expr.kind {
                         if let Some(res) = self.res_ptr {
-                            let ptr = self.emit_inst(MirInst::SlicePtr(rv), MirType::Ptr);
-                            let len = self.emit_inst(MirInst::SliceLen(rv), MirType::I64);
+                            let doc_html = Self::render_jsx_element_to_html(elem);
+                            let script_tag = if doc_html.contains("data-wml-island") {
+                                r#"<script type="module" src="/_wml/assets/islands.js"></script>"#
+                            } else {
+                                ""
+                            };
+                            let full_doc = format!(
+                                "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>WML App</title></head><body>{}{}</body></html>",
+                                doc_html, script_tag
+                            );
+                            let v_doc = self.emit_inst(
+                                MirInst::Const(MirConstant::Str(full_doc)),
+                                MirType::Slice,
+                            );
+                            let ptr = self.emit_inst(MirInst::SlicePtr(v_doc), MirType::Ptr);
+                            let len = self.emit_inst(MirInst::SliceLen(v_doc), MirType::I64);
                             self.emit_inst(
                                 MirInst::CallRuntime {
                                     intrinsic: "wml_res_set_body".to_string(),
@@ -341,6 +509,66 @@ impl MirLowerer {
                                 },
                                 MirType::Unit,
                             );
+                            let ct_str = self.emit_inst(
+                                MirInst::Const(MirConstant::Str(
+                                    "text/html; charset=utf-8".to_string(),
+                                )),
+                                MirType::Slice,
+                            );
+                            let ct_ptr = self.emit_inst(MirInst::SlicePtr(ct_str), MirType::Ptr);
+                            let ct_len = self.emit_inst(MirInst::SliceLen(ct_str), MirType::I64);
+                            self.emit_inst(
+                                MirInst::CallRuntime {
+                                    intrinsic: "wml_res_set_content_type".to_string(),
+                                    args: vec![res, ct_ptr, ct_len],
+                                },
+                                MirType::Unit,
+                            );
+                        }
+                    }
+                }
+            }
+            HirStmt::Return { val, .. } => {
+                let ret_val = val.as_ref().map(|e| self.lower_expr(e));
+                if in_route {
+                    if let Some(rv) = ret_val {
+                        if let Some(res) = self.res_ptr {
+                            let val_ty = val.as_ref().map(|e| Self::type_to_mir(&e.ty));
+                            match val_ty {
+                                Some(MirType::Slice) => {
+                                    let ptr = self.emit_inst(MirInst::SlicePtr(rv), MirType::Ptr);
+                                    let len = self.emit_inst(MirInst::SliceLen(rv), MirType::I64);
+                                    self.emit_inst(
+                                        MirInst::CallRuntime {
+                                            intrinsic: "wml_res_set_body".to_string(),
+                                            args: vec![res, ptr, len],
+                                        },
+                                        MirType::Unit,
+                                    );
+                                }
+                                Some(MirType::I64) | Some(MirType::Bool) => {
+                                    if let Some(arena) = self.arena_ptr {
+                                        self.emit_inst(
+                                            MirInst::CallRuntime {
+                                                intrinsic: "wml_res_set_body_i64".to_string(),
+                                                args: vec![arena, res, rv],
+                                            },
+                                            MirType::Unit,
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    let ptr = self.emit_inst(MirInst::SlicePtr(rv), MirType::Ptr);
+                                    let len = self.emit_inst(MirInst::SliceLen(rv), MirType::I64);
+                                    self.emit_inst(
+                                        MirInst::CallRuntime {
+                                            intrinsic: "wml_res_set_body".to_string(),
+                                            args: vec![res, ptr, len],
+                                        },
+                                        MirType::Unit,
+                                    );
+                                }
+                            }
                         }
                     }
                     let zero = self.emit_inst(MirInst::Const(MirConstant::Int(0)), MirType::I64);
@@ -702,4 +930,19 @@ fn slugify_path(path: &str) -> String {
     path.trim_matches('/')
         .replace(['/', '-'], "_")
         .replace(':', "param_")
+}
+
+fn escape_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }

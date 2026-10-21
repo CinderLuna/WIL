@@ -20,6 +20,7 @@ Cargo.lock
 *.wmlc
 wml-cache/
 wml-build/
+dist/
 
 # Test & Profiling outputs
 criterion/
