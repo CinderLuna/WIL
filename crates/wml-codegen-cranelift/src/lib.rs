@@ -2,6 +2,12 @@ use wml_mir::MirModule;
 
 pub struct CraneliftJitBackend;
 
+impl Default for CraneliftJitBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CraneliftJitBackend {
     pub fn new() -> Self {
         Self

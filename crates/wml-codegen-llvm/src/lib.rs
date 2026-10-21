@@ -2,6 +2,12 @@ use wml_mir::MirModule;
 
 pub struct LlvmAotBackend;
 
+impl Default for LlvmAotBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LlvmAotBackend {
     pub fn new() -> Self {
         Self
